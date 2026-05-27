@@ -14,18 +14,35 @@ ROOT = Path(__file__).resolve().parents[1]
 DEPLOY_URL = "https://space.ai-builders.com/backend/v1/deployments"
 
 
-def _load_token() -> str:
+def _read_dotenv() -> dict[str, str]:
+    out: dict[str, str] = {}
     env_path = ROOT / ".env"
-    if env_path.is_file():
-        for line in env_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line.startswith("AI_BUILDER_TOKEN="):
-                return line.split("=", 1)[1].strip().strip('"').strip("'")
-    token = os.getenv("AI_BUILDER_TOKEN", "").strip()
+    if not env_path.is_file():
+        return out
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, val = line.split("=", 1)
+        out[key.strip()] = val.strip().strip('"').strip("'")
+    return out
+
+
+def _load_token() -> str:
+    token = _read_dotenv().get("AI_BUILDER_TOKEN", "") or os.getenv("AI_BUILDER_TOKEN", "").strip()
     if not token:
         print("AI_BUILDER_TOKEN missing (.env or environment).", file=sys.stderr)
         sys.exit(1)
     return token
+
+
+def _merge_env_vars(cfg: dict) -> dict[str, str]:
+    env = dict(cfg.get("env_vars") or {})
+    for key in ("APP_PASSWORD", "SESSION_SECRET", "INDEX_BUNDLE_URL", "HTTPS_PROXY", "HTTP_PROXY"):
+        val = _read_dotenv().get(key, "").strip()
+        if val and key not in env:
+            env[key] = val
+    return env
 
 
 def main() -> None:
@@ -38,8 +55,14 @@ def main() -> None:
         "branch": cfg["branch"],
         "port": cfg.get("port", 8000),
     }
-    if cfg.get("env_vars"):
-        body["env_vars"] = cfg["env_vars"]
+    env_vars = _merge_env_vars(cfg)
+    if env_vars:
+        body["env_vars"] = env_vars
+    if not env_vars.get("APP_PASSWORD") and cfg.get("service_name"):
+        print(
+            "Warning: APP_PASSWORD not set — public site will stay open without login.",
+            file=sys.stderr,
+        )
     if cfg.get("streaming_log_timeout_seconds"):
         body["streaming_log_timeout_seconds"] = cfg["streaming_log_timeout_seconds"]
 

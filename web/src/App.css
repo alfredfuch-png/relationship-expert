@@ -226,6 +226,15 @@
 .sidebar-foot {
   margin-top: auto;
   padding-top: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.logout-btn {
+  width: 100%;
+  font-size: 13px;
+  padding: 0.45rem 0.65rem;
 }
 
 .chat-panel {

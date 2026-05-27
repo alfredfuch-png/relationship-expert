@@ -5,18 +5,29 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from app.auth import (
+    auth_enabled,
+    clear_session_cookie,
+    require_session,
+    set_session_cookie,
+    verify_password,
+    verify_session,
+)
 from app.chat import build_system_prompt, build_user_message, stream_chat_completion
 from app.indexing import read_index_meta, rebuild_index_async
 from app.retrieve import retrieve_context
 from app.settings import _project_root, get_settings
 from app.startup import ensure_index_bundle
+
+SessionDep = Annotated[None, Depends(require_session)]
 
 
 def _web_dist() -> Path:
@@ -60,14 +71,46 @@ class ChatBody(BaseModel):
     message: str = Field(min_length=1, max_length=8000)
 
 
+class LoginBody(BaseModel):
+    password: str = Field(min_length=1, max_length=256)
+
+
+@app.get("/api/auth/status")
+def auth_status(request: Request) -> dict:
+    s = get_settings()
+    enabled = auth_enabled(s)
+    return {
+        "auth_required": enabled,
+        "authenticated": verify_session(request.cookies.get("re_session"), s) if enabled else True,
+    }
+
+
+@app.post("/api/auth/login")
+def auth_login(body: LoginBody, response: Response) -> dict:
+    s = get_settings()
+    if not auth_enabled(s):
+        return {"ok": True, "auth_required": False}
+    if not verify_password(body.password, s):
+        raise HTTPException(status_code=401, detail="密码错误")
+    set_session_cookie(response, s)
+    return {"ok": True, "auth_required": True}
+
+
+@app.post("/api/auth/logout")
+def auth_logout(response: Response) -> dict:
+    clear_session_cookie(response)
+    return {"ok": True}
+
+
 @app.get("/api/config")
-def public_config() -> dict:
+def public_config(_session: SessionDep) -> dict:
     s = get_settings()
     return {
         "public_deploy": s.public_deploy,
         "show_sources": not s.public_deploy,
         "show_routing": not s.public_deploy,
         "allow_index": not s.public_deploy,
+        "auth_required": auth_enabled(s),
     }
 
 
@@ -85,7 +128,7 @@ def health() -> dict[str, str]:
 
 
 @app.get("/api/index/status")
-def index_status() -> dict:
+def index_status(_session: SessionDep) -> dict:
     s = get_settings()
     meta = read_index_meta(s.data_dir.resolve())
     if s.public_deploy:
@@ -99,7 +142,7 @@ def index_status() -> dict:
 
 
 @app.post("/api/index")
-async def run_index() -> dict:
+async def run_index(_session: SessionDep) -> dict:
     s = get_settings()
     if s.public_deploy:
         raise HTTPException(status_code=403, detail="Indexing is disabled on the public deployment.")
@@ -153,7 +196,7 @@ async def _ndjson_chat_events(message: str) -> AsyncIterator[bytes]:
 
 
 @app.post("/api/chat")
-async def chat(body: ChatBody) -> StreamingResponse:
+async def chat(body: ChatBody, _session: SessionDep) -> StreamingResponse:
     return StreamingResponse(
         _ndjson_chat_events(body.message),
         media_type="application/x-ndjson",

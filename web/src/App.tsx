@@ -81,7 +81,7 @@ function useIndexStatus() {
   const refresh = useCallback(async () => {
     setLoading(true)
     try {
-      const r = await fetch('/api/index/status')
+      const r = await fetch('/api/index/status', { credentials: 'include' })
       setStatus(await r.json())
     } catch {
       setStatus({ error: 'Cannot reach backend' })
@@ -104,6 +104,7 @@ type AppConfig = {
   show_sources: boolean
   show_routing: boolean
   allow_index: boolean
+  auth_required?: boolean
 }
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -116,7 +117,7 @@ const DEFAULT_CONFIG: AppConfig = {
 function useAppConfig() {
   const [config, setConfig] = useState<AppConfig>(DEFAULT_CONFIG)
   useEffect(() => {
-    fetch('/api/config')
+    fetch('/api/config', { credentials: 'include' })
       .then((r) => r.json())
       .then((o) => setConfig({ ...DEFAULT_CONFIG, ...(o as AppConfig) }))
       .catch(() => setConfig(DEFAULT_CONFIG))
@@ -133,8 +134,13 @@ async function streamChat(
   const res = await fetch('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
     body: JSON.stringify({ message }),
   })
+  if (res.status === 401) {
+    onError('请先登录后再提问。')
+    return
+  }
   if (!res.ok || !res.body) {
     onError(`Chat failed (${res.status})`)
     return
@@ -281,7 +287,7 @@ export default function App() {
   async function handleIndex() {
     setIndexing(true)
     try {
-      const r = await fetch('/api/index', { method: 'POST' })
+      const r = await fetch('/api/index', { method: 'POST', credentials: 'include' })
       if (!r.ok) {
         const d = (await r.json().catch(() => null)) as { detail?: unknown } | null
         const detail =
@@ -434,6 +440,19 @@ export default function App() {
 
         <footer className="sidebar-foot muted small">
           对话模型：deepseek · 可先按标签收窄再检索上下文
+          {appConfig.auth_required ? (
+            <button
+              type="button"
+              className="btn secondary logout-btn"
+              onClick={() => {
+                void fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }).then(
+                  () => window.location.reload(),
+                )
+              }}
+            >
+              退出登录
+            </button>
+          ) : null}
         </footer>
       </aside>
 

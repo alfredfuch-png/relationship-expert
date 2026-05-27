@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     # Optional HTTPS URL to a zip of pre-built data/ (chunks + embeddings) for production.
     index_bundle_url: str = ""
 
+    # When set, visitors must log in (cookie session). Use APP_PASSWORD in deploy env_vars / .env.
+    app_password: str = ""
+    session_secret: str = ""
+    cookie_secure: bool = False
+
     ai_builder_token: str = ""
     ai_api_base_url: str = "https://space.ai-builders.com/backend/v1"
     ai_chat_model: str = "deepseek"
