@@ -6,7 +6,7 @@
 
 | 项目 | Digital Twin | Romance Expert（本项目） |
 |------|----------------|---------------------------|
-| 索引范围 | 整个 vault（`cfuobs_vault`） | 仅 **`关于亲密关系`** 文件夹：`…/cfuobs_vault/关于亲密关系` |
+| 索引范围 | 整个 vault | 仅 **`VAULT_PATH`** 下的 Markdown（专题目录由你在 `.env` 指定） |
 | 产品定位 | 个人知识分身 | 亲密关系 / 恋爱向笔记问答 |
 
 模型、网关、向量存储方式与 Digital Twin 一致。
@@ -53,12 +53,13 @@ Open **http://localhost:5174** → **构建索引** → 对话。
 
 ## Notes path
 
-Default: `C:\Users\alfre\Documents\GitHub\cfuobs_vault\关于亲密关系`  
-Override in `.env`:
+Set in `.env` (create from `.env.example`):
 
 ```env
-VAULT_PATH=C:/path/to/cfuobs_vault/关于亲密关系
+VAULT_PATH=./notes
 ```
+
+Use any folder that contains your relationship-topic Obsidian notes (only `*.md` under that path are indexed).
 
 Only `*.md` files **under this directory** (recursively) are indexed. After changing path or note content, click **Build index** again.
 
@@ -66,7 +67,7 @@ Tag routing, multi-note retrieval, and tuning knobs match Digital Twin — see t
 
 ## Privacy（推送到 GitHub 时）
 
-- **你的 Obsidian 笔记不会进仓库**：笔记在 `VAULT_PATH` 指向的目录（默认在 vault 仓库外或你本机的 `cfuobs_vault/关于亲密关系`），项目只通过路径读取，**不会**把 `.md` 打进 git。
+- **Obsidian 笔记不会进仓库**：笔记只在 `VAULT_PATH` 指向的本机目录，项目运行时读取，**不会**把 `.md` 或 `data/` 索引打进 git。
 - **`.env` 与 `data/` 已忽略**：含 API Token 与本地索引（`chunks.jsonl`、`embeddings.npz`），克隆者拿不到你的密钥和已建索引。
 - **其他人如何使用**：克隆后复制 `.env.example` → `.env`，填自己的 `AI_BUILDER_TOKEN`，把 `VAULT_PATH` 改成**他们自己的**笔记目录，再「构建索引」即可；没有你的笔记也能跑，只是回答基于他们自己的内容。
 

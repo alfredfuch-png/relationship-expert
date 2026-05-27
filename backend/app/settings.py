@@ -15,8 +15,8 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Only notes under this folder are indexed (default: 亲密关系专题目录).
-    vault_path: Path = Path(r"C:\Users\alfre\Documents\GitHub\cfuobs_vault\关于亲密关系")
+    # Only notes under this folder are indexed. Override via VAULT_PATH in .env.
+    vault_path: Path = Path("notes")
     data_dir: Path = Field(default_factory=lambda: _project_root() / "data")
 
     ai_builder_token: str = ""
