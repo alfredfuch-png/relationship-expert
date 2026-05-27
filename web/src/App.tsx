@@ -1,0 +1,503 @@
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent } from 'react'
+import './App.css'
+
+type Role = 'user' | 'assistant'
+
+type Source = {
+  id: string
+  note_path: string
+  note_title: string
+  heading_path: string
+  source: string
+}
+
+type ChatMessage = {
+  role: Role
+  content: string
+  sources?: Source[]
+  routing?: RoutingInfo
+  error?: string
+}
+
+type RoutingInfo = {
+  tag_routing?: boolean
+  tag_routing_ready?: boolean
+  applied_tags?: string[]
+  tag_scores?: Record<string, number>
+  scoped?: boolean
+  scoped_chunk_count?: number
+  fallback_reason?: string | null
+}
+
+type ChatThread = {
+  id: string
+  title: string
+  messages: ChatMessage[]
+  updatedAt: number
+}
+
+/** Separate from Digital Twin so both apps can save threads side-by-side. */
+const LS_KEY = 'romance-expert-chat-threads-v1'
+const MAX_STORED_THREADS = 50
+
+function newId(): string {
+  return crypto.randomUUID()
+}
+
+function titleFromMessages(messages: ChatMessage[], fallback: string): string {
+  const first = messages.find((m) => m.role === 'user' && m.content.trim())
+  if (!first) return fallback
+  const line = first.content.trim().split('\n')[0] ?? ''
+  if (!line) return fallback
+  return line.length > 48 ? `${line.slice(0, 45)}…` : line
+}
+
+function loadPersisted(): { threads: ChatThread[]; activeId: string } | null {
+  try {
+    const raw = localStorage.getItem(LS_KEY)
+    if (!raw) return null
+    const o = JSON.parse(raw) as { threads?: ChatThread[]; activeId?: string }
+    if (!Array.isArray(o.threads) || o.threads.length === 0) return null
+    const threads = o.threads.filter(
+      (t) => t && typeof t.id === 'string' && Array.isArray(t.messages),
+    ) as ChatThread[]
+    if (!threads.length) return null
+    const activeId = o.activeId && threads.some((t) => t.id === o.activeId) ? o.activeId : threads[0].id
+    return { threads, activeId }
+  } catch {
+    return null
+  }
+}
+
+function capThreads(list: ChatThread[]): ChatThread[] {
+  if (list.length <= MAX_STORED_THREADS) return list
+  return [...list].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, MAX_STORED_THREADS)
+}
+
+function useIndexStatus() {
+  const [status, setStatus] = useState<Record<string, unknown> | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  const refresh = useCallback(async () => {
+    setLoading(true)
+    try {
+      const r = await fetch('/api/index/status')
+      setStatus(await r.json())
+    } catch {
+      setStatus({ error: 'Cannot reach backend' })
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void refresh()
+  }, [refresh])
+
+  return { status, loading, refresh }
+}
+
+type StreamMeta = { sources: Source[]; routing?: RoutingInfo }
+
+async function streamChat(
+  message: string,
+  onMeta: (m: StreamMeta) => void,
+  onToken: (t: string) => void,
+  onError: (e: string) => void,
+) {
+  const res = await fetch('/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message }),
+  })
+  if (!res.ok || !res.body) {
+    onError(`Chat failed (${res.status})`)
+    return
+  }
+  const reader = res.body.getReader()
+  const dec = new TextDecoder()
+  let buf = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buf += dec.decode(value, { stream: true })
+    for (;;) {
+      const nl = buf.indexOf('\n')
+      if (nl < 0) break
+      const line = buf.slice(0, nl).trim()
+      buf = buf.slice(nl + 1)
+      if (!line) continue
+      let obj: Record<string, unknown>
+      try {
+        obj = JSON.parse(line) as Record<string, unknown>
+      } catch {
+        continue
+      }
+      if (Array.isArray(obj.sources)) {
+        onMeta({
+          sources: obj.sources as Source[],
+          routing: obj.routing as RoutingInfo | undefined,
+        })
+        continue
+      }
+      if (typeof obj.error === 'string') {
+        onError(obj.error)
+        return
+      }
+      if (typeof obj.text === 'string') {
+        onToken(obj.text)
+      }
+    }
+  }
+}
+
+export default function App() {
+  const { status, loading: statusLoading, refresh } = useIndexStatus()
+  const [indexing, setIndexing] = useState(false)
+  const [threads, setThreads] = useState<ChatThread[]>(() => {
+    const saved = loadPersisted()
+    if (saved) return capThreads(saved.threads)
+    const id = newId()
+    return [{ id, title: '新对话', messages: [], updatedAt: Date.now() }]
+  })
+  const [activeId, setActiveId] = useState(() => loadPersisted()?.activeId ?? threads[0]?.id ?? newId())
+  const [input, setInput] = useState('')
+  const [sending, setSending] = useState(false)
+  const scrollRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    localStorage.setItem(LS_KEY, JSON.stringify({ threads, activeId }))
+  }, [threads, activeId])
+
+  const activeThread = threads.find((t) => t.id === activeId)
+  const messages = activeThread?.messages ?? []
+
+  const recentsSorted = useMemo(
+    () => [...threads].sort((a, b) => b.updatedAt - a.updatedAt),
+    [threads],
+  )
+
+  const ready = Boolean(status?.ready)
+  const metaLine = useMemo(() => {
+    if (!status) return '正在连接…'
+    const chunks = status.chunk_count as number | undefined
+    const vec = status.vector_enabled ? '向量 + BM25' : '仅 BM25'
+    const at = status.last_indexed_at as string | undefined
+    const tagN = Number(status.tag_count ?? 0)
+    const tagsLine =
+      Boolean(status.tag_routing_ready) && tagN > 0
+        ? ` · ${tagN} 个标签（路由已启用）`
+        : tagN > 0
+          ? ` · ${tagN} 个标签（重建后可路由）`
+          : ''
+    return `${ready ? '已就绪' : '未索引'} · ${chunks ?? 0} 个切片 · ${vec}${tagsLine}${at ? ` · ${at}` : ''}`
+  }, [status, ready])
+
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
+  }, [messages, sending, activeId])
+
+  const updateActiveMessages = useCallback(
+    (fn: (prev: ChatMessage[]) => ChatMessage[]) => {
+      setThreads((ts) =>
+        capThreads(
+          ts.map((t) => {
+            if (t.id !== activeId) return t
+            const nextMsgs = fn(t.messages)
+            const nextTitle =
+              t.title === '新对话' ? titleFromMessages(nextMsgs, '新对话') : t.title
+            return { ...t, messages: nextMsgs, title: nextTitle, updatedAt: Date.now() }
+          }),
+        ),
+      )
+    },
+    [activeId],
+  )
+
+  function handleNewChat() {
+    if (sending) return
+    const id = newId()
+    const thread: ChatThread = { id, title: '新对话', messages: [], updatedAt: Date.now() }
+    setThreads((ts) => capThreads([thread, ...ts]))
+    setActiveId(id)
+    setInput('')
+  }
+
+  function handleSelectThread(id: string) {
+    if (sending || id === activeId) return
+    setActiveId(id)
+    setInput('')
+  }
+
+  function handleDeleteThread(idToDelete: string, e: MouseEvent) {
+    e.stopPropagation()
+    if (sending) return
+    const filtered = threads.filter((t) => t.id !== idToDelete)
+    const nextList: ChatThread[] =
+      filtered.length > 0
+        ? capThreads(filtered)
+        : [{ id: newId(), title: '新对话', messages: [], updatedAt: Date.now() }]
+    setThreads(nextList)
+    if (activeId === idToDelete) {
+      const sorted = [...nextList].sort((a, b) => b.updatedAt - a.updatedAt)
+      setActiveId(sorted[0]!.id)
+    }
+    setInput('')
+  }
+
+  async function handleIndex() {
+    setIndexing(true)
+    try {
+      const r = await fetch('/api/index', { method: 'POST' })
+      if (!r.ok) {
+        const d = (await r.json().catch(() => null)) as { detail?: unknown } | null
+        const detail =
+          typeof d?.detail === 'string' ? d.detail : JSON.stringify(d?.detail ?? {})
+        throw new Error(detail || r.statusText)
+      }
+      await refresh()
+    } catch (e) {
+      alert(e instanceof Error ? e.message : String(e))
+    } finally {
+      setIndexing(false)
+    }
+  }
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault()
+    const q = input.trim()
+    if (!q || sending) return
+    setInput('')
+    updateActiveMessages((m) => [...m, { role: 'user', content: q }])
+    setSending(true)
+
+    let acc = ''
+    let sources: Source[] | undefined
+    let routing: RoutingInfo | undefined
+    let hadError = false
+
+    await streamChat(
+      q,
+      ({ sources: src, routing: rv }) => {
+        sources = src
+        routing = rv
+      },
+      (t) => {
+        acc += t
+        updateActiveMessages((m) => {
+          const copy = [...m]
+          const last = copy[copy.length - 1]
+          if (last?.role === 'assistant' && !last.error) {
+            copy[copy.length - 1] = { ...last, content: acc, sources, routing }
+          } else {
+            copy.push({ role: 'assistant', content: acc, sources, routing })
+          }
+          return copy
+        })
+      },
+      (err) => {
+        hadError = true
+        updateActiveMessages((m) => [
+          ...m,
+          { role: 'assistant', content: '', error: err, sources, routing },
+        ])
+      },
+    )
+
+    setSending(false)
+
+    if (!hadError && acc.trim() === '') {
+      updateActiveMessages((m) => [
+        ...m,
+        { role: 'assistant', content: '', error: '模型返回为空。', sources, routing },
+      ])
+    }
+  }
+
+  return (
+    <div className="shell">
+      <aside className="sidebar">
+        <div className="brand">
+          <span className="logo">♥</span>
+          <span>Romance Expert</span>
+        </div>
+        <p className="muted small">亲密关系 RAG · 仅索引「关于亲密关系」文件夹</p>
+
+        <button
+          type="button"
+          className="btn new-chat"
+          disabled={sending}
+          onClick={handleNewChat}
+        >
+          + 新对话
+        </button>
+
+        <div className="recents-section">
+          <div className="recents-heading">最近</div>
+          <div className="recents-list" role="list">
+            {recentsSorted.map((t) => (
+              <div
+                key={t.id}
+                className={`recents-row ${t.id === activeId ? 'active' : ''}`}
+                role="listitem"
+              >
+                <button
+                  type="button"
+                  className="recents-select"
+                  disabled={sending}
+                  onClick={() => handleSelectThread(t.id)}
+                >
+                  <span className="recents-title">{t.title}</span>
+                  <span className="recents-meta muted small">
+                    {new Date(t.updatedAt).toLocaleString(undefined, {
+                      month: 'short',
+                      day: 'numeric',
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="recents-delete"
+                  title="删除对话"
+                  aria-label={`删除对话：${t.title}`}
+                  disabled={sending}
+                  onClick={(e) => handleDeleteThread(t.id, e)}
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="status-card">
+          <div className="status-title">索引</div>
+          <p className="status-body">{statusLoading ? '加载中…' : metaLine}</p>
+          {(status?.error as string | undefined)?.length ? (
+            <p className="warn small">{String(status?.error)}</p>
+          ) : null}
+          <button
+            type="button"
+            className="btn secondary"
+            disabled={indexing}
+            onClick={() => void handleIndex()}
+          >
+            {indexing ? '正在构建…' : '构建索引'}
+          </button>
+        </div>
+
+        <footer className="sidebar-foot muted small">
+          对话模型：deepseek · 可先按标签收窄再检索上下文
+        </footer>
+      </aside>
+
+      <main className="chat-panel">
+        <header className="topbar">
+          <div className="topbar-left">
+            <button
+              type="button"
+              className="btn new-chat mobile-only"
+              disabled={sending}
+              onClick={handleNewChat}
+            >
+              + 新对话
+            </button>
+            <h1>{activeThread?.title ?? '对话'}</h1>
+          </div>
+        </header>
+
+        <div className="thread" ref={scrollRef}>
+          {messages.length === 0 ? (
+            <div className="empty">
+              <h2>问你的亲密关系笔记</h2>
+              <p className="muted">
+                {ready
+                  ? '回答基于「关于亲密关系」目录下检索到的片段，并附带引用编号。'
+                  : '请先构建索引，然后开始对话。'}
+              </p>
+            </div>
+          ) : (
+            messages.map((msg, i) => (
+              <div key={`${activeId}-${i}-${msg.role}`} className={`bubble-row ${msg.role}`}>
+                <div className="avatar">{msg.role === 'user' ? '我' : '专家'}</div>
+                <div className={`bubble ${msg.role}`}>
+                  {msg.error ? (
+                    <p className="err">{msg.error}</p>
+                  ) : (
+                    <div className="md">
+                      {msg.content || (sending && msg.role === 'assistant' ? '…' : '')}
+                    </div>
+                  )}
+                  {msg.role === 'assistant' && msg.routing?.tag_routing ? (
+                    <div className="routing-hint muted small">
+                      {(msg.routing.applied_tags?.length ?? 0) > 0 ? (
+                        <>
+                          <strong>标签收窄</strong>：{msg.routing.applied_tags!.join('、')}
+                          {msg.routing.scoped ? (
+                            <span> （仅限带上述标签的笔记检索）</span>
+                          ) : (
+                            <span>
+                              {msg.routing.fallback_reason
+                                ? ` （未收窄：${msg.routing.fallback_reason}）`
+                                : ' （未收窄）'}
+                            </span>
+                          )}
+                        </>
+                      ) : msg.routing.tag_routing_ready === false &&
+                        msg.routing.fallback_reason === 'rebuild_index_for_tag_router' ? (
+                        <span>
+                          点击 <strong>构建索引</strong> 后可启用标签语义路由。
+                        </span>
+                      ) : msg.routing.fallback_reason ? (
+                        <span>标签路由：{msg.routing.fallback_reason}</span>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {msg.sources?.length ? (
+                    <div className="sources">
+                      <div className="src-title">出处</div>
+                      <ul>
+                        {msg.sources.map((s) => (
+                          <li key={s.id}>
+                            <span className="pill">{s.source}</span>
+                            <strong>{s.note_title}</strong>
+                            <span className="muted"> · {s.heading_path}</span>
+                            <div className="path muted small">{s.note_path}</div>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+
+        <form className="composer" onSubmit={(e) => void handleSubmit(e)}>
+          <textarea
+            className="input"
+            rows={2}
+            placeholder={
+              ready ? '输入问题（恋爱、婚姻、沟通、边界……）' : '请先构建索引再发送'
+            }
+            value={input}
+            disabled={!ready || sending}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault()
+                void handleSubmit(e)
+              }
+            }}
+          />
+          <button type="submit" className="btn send" disabled={!ready || sending || !input.trim()}>
+            发送
+          </button>
+        </form>
+      </main>
+    </div>
+  )
+}
