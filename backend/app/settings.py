@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 from pydantic import Field
@@ -5,6 +6,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def _project_root() -> Path:
+    explicit = os.getenv("PROJECT_ROOT", "").strip()
+    if explicit:
+        return Path(explicit)
     return Path(__file__).resolve().parents[2]
 
 
@@ -17,7 +21,14 @@ class Settings(BaseSettings):
 
     # Only notes under this folder are indexed. Override via VAULT_PATH in .env.
     vault_path: Path = Path("notes")
-    data_dir: Path = Field(default_factory=lambda: _project_root() / "data")
+    data_dir: Path = Field(
+        default_factory=lambda: Path(os.getenv("DATA_DIR", str(_project_root() / "data")))
+    )
+
+    # Hosted public app: hide sources/citations in UI; disable rebuild from browser.
+    public_deploy: bool = False
+    # Optional HTTPS URL to a zip of pre-built data/ (chunks + embeddings) for production.
+    index_bundle_url: str = ""
 
     ai_builder_token: str = ""
     ai_api_base_url: str = "https://space.ai-builders.com/backend/v1"

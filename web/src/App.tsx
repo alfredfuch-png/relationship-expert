@@ -97,7 +97,32 @@ function useIndexStatus() {
   return { status, loading, refresh }
 }
 
-type StreamMeta = { sources: Source[]; routing?: RoutingInfo }
+type StreamMeta = { sources?: Source[]; routing?: RoutingInfo }
+
+type AppConfig = {
+  public_deploy: boolean
+  show_sources: boolean
+  show_routing: boolean
+  allow_index: boolean
+}
+
+const DEFAULT_CONFIG: AppConfig = {
+  public_deploy: false,
+  show_sources: true,
+  show_routing: true,
+  allow_index: true,
+}
+
+function useAppConfig() {
+  const [config, setConfig] = useState<AppConfig>(DEFAULT_CONFIG)
+  useEffect(() => {
+    fetch('/api/config')
+      .then((r) => r.json())
+      .then((o) => setConfig({ ...DEFAULT_CONFIG, ...(o as AppConfig) }))
+      .catch(() => setConfig(DEFAULT_CONFIG))
+  }, [])
+  return config
+}
 
 async function streamChat(
   message: string,
@@ -140,6 +165,10 @@ async function streamChat(
         })
         continue
       }
+      if (obj.meta && typeof obj.meta === 'object') {
+        onMeta({})
+        continue
+      }
       if (typeof obj.error === 'string') {
         onError(obj.error)
         return
@@ -152,6 +181,7 @@ async function streamChat(
 }
 
 export default function App() {
+  const appConfig = useAppConfig()
   const { status, loading: statusLoading, refresh } = useIndexStatus()
   const [indexing, setIndexing] = useState(false)
   const [threads, setThreads] = useState<ChatThread[]>(() => {
@@ -183,6 +213,9 @@ export default function App() {
     const chunks = status.chunk_count as number | undefined
     const vec = status.vector_enabled ? '向量 + BM25' : '仅 BM25'
     const at = status.last_indexed_at as string | undefined
+    if (appConfig.public_deploy) {
+      return `${ready ? '已就绪' : '服务暂不可用'} · ${chunks ?? 0} 个知识片段${at ? ` · ${at}` : ''}`
+    }
     const tagN = Number(status.tag_count ?? 0)
     const tagsLine =
       Boolean(status.tag_routing_ready) && tagN > 0
@@ -191,7 +224,7 @@ export default function App() {
           ? ` · ${tagN} 个标签（重建后可路由）`
           : ''
     return `${ready ? '已就绪' : '未索引'} · ${chunks ?? 0} 个切片 · ${vec}${tagsLine}${at ? ` · ${at}` : ''}`
-  }, [status, ready])
+  }, [status, ready, appConfig.public_deploy])
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
@@ -321,7 +354,11 @@ export default function App() {
           <span className="logo">♥</span>
           <span>Romance Expert</span>
         </div>
-        <p className="muted small">亲密关系 RAG · 仅索引「关于亲密关系」文件夹</p>
+        <p className="muted small">
+          {appConfig.public_deploy
+            ? '亲密关系顾问 · 在线版'
+            : '亲密关系 RAG · 仅索引「关于亲密关系」文件夹'}
+        </p>
 
         <button
           type="button"
@@ -372,21 +409,28 @@ export default function App() {
           </div>
         </div>
 
-        <div className="status-card">
-          <div className="status-title">索引</div>
-          <p className="status-body">{statusLoading ? '加载中…' : metaLine}</p>
-          {(status?.error as string | undefined)?.length ? (
-            <p className="warn small">{String(status?.error)}</p>
-          ) : null}
-          <button
-            type="button"
-            className="btn secondary"
-            disabled={indexing}
-            onClick={() => void handleIndex()}
-          >
-            {indexing ? '正在构建…' : '构建索引'}
-          </button>
-        </div>
+        {appConfig.allow_index ? (
+          <div className="status-card">
+            <div className="status-title">索引</div>
+            <p className="status-body">{statusLoading ? '加载中…' : metaLine}</p>
+            {(status?.error as string | undefined)?.length ? (
+              <p className="warn small">{String(status?.error)}</p>
+            ) : null}
+            <button
+              type="button"
+              className="btn secondary"
+              disabled={indexing}
+              onClick={() => void handleIndex()}
+            >
+              {indexing ? '正在构建…' : '构建索引'}
+            </button>
+          </div>
+        ) : (
+          <div className="status-card">
+            <div className="status-title">状态</div>
+            <p className="status-body">{statusLoading ? '加载中…' : metaLine}</p>
+          </div>
+        )}
 
         <footer className="sidebar-foot muted small">
           对话模型：deepseek · 可先按标签收窄再检索上下文
@@ -414,8 +458,12 @@ export default function App() {
               <h2>问你的亲密关系笔记</h2>
               <p className="muted">
                 {ready
-                  ? '回答基于「关于亲密关系」目录下检索到的片段，并附带引用编号。'
-                  : '请先构建索引，然后开始对话。'}
+                  ? appConfig.public_deploy
+                    ? '直接提问即可，我会根据知识库给出建议。'
+                    : '回答基于「关于亲密关系」目录下检索到的片段，并附带引用编号。'
+                  : appConfig.allow_index
+                    ? '请先构建索引，然后开始对话。'
+                    : '知识库尚未就绪，请稍后再试。'}
               </p>
             </div>
           ) : (
@@ -430,7 +478,7 @@ export default function App() {
                       {msg.content || (sending && msg.role === 'assistant' ? '…' : '')}
                     </div>
                   )}
-                  {msg.role === 'assistant' && msg.routing?.tag_routing ? (
+                  {appConfig.show_routing && msg.role === 'assistant' && msg.routing?.tag_routing ? (
                     <div className="routing-hint muted small">
                       {(msg.routing.applied_tags?.length ?? 0) > 0 ? (
                         <>
@@ -455,7 +503,7 @@ export default function App() {
                       ) : null}
                     </div>
                   ) : null}
-                  {msg.sources?.length ? (
+                  {appConfig.show_sources && msg.sources?.length ? (
                     <div className="sources">
                       <div className="src-title">出处</div>
                       <ul>

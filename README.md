@@ -71,6 +71,32 @@ Tag routing, multi-note retrieval, and tuning knobs match Digital Twin — see t
 - **`.env` 与 `data/` 已忽略**：含 API Token 与本地索引（`chunks.jsonl`、`embeddings.npz`），克隆者拿不到你的密钥和已建索引。
 - **其他人如何使用**：克隆后复制 `.env.example` → `.env`，填自己的 `AI_BUILDER_TOKEN`，把 `VAULT_PATH` 改成**他们自己的**笔记目录，再「构建索引」即可；没有你的笔记也能跑，只是回答基于他们自己的内容。
 
+## Deploy（AI Builders Space）
+
+公开托管遵循 [AI Builders 部署说明](https://www.ai-builders.com/resources/students-backend/openapi.json)：单进程、根目录 `Dockerfile`、`PORT` 环境变量、静态前端由 FastAPI 同端口提供。
+
+**公开版行为**（`PUBLIC_DEPLOY=true`，见 `deploy-config.json`）：
+
+- 回答**不显示**出处列表、标签路由说明，也不在正文里要求 `[1]` 引用编号
+- 访客**不能**在网页上重建索引（索引由你在服务端维护）
+
+**知识库上云（不提交源 `.md`）**：
+
+1. 本地先构建索引（`data/` 已有 `chunks.jsonl` 等）
+2. `.\scripts\package_index.ps1` → 生成 `relationship-expert-index.zip`（已在 `.gitignore`，勿提交公开仓库）
+3. 把 zip 上传到你控制的私密存储（对象存储 / 私有下载链接等）
+4. 在 `deploy-config.json` 的 `env_vars` 里增加 `INDEX_BUNDLE_URL` 为该 zip 的 HTTPS 地址
+5. 推送代码后执行部署：
+
+```powershell
+cd backend
+.\.venv\Scripts\python ..\scripts\deploy.py
+```
+
+部署成功后访问：**https://relationship-expert.ai-builders.space**（`service_name` 与 `deploy-config.json` 一致）。
+
+平台会自动注入 `AI_BUILDER_TOKEN`，无需写进 `env_vars`。
+
 ## Security
 
 Treat `AI_BUILDER_TOKEN` like a password; rotate it if it was ever pasted into chat or checked into git.

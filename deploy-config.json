@@ -1,0 +1,11 @@
+{
+  "repo_url": "https://github.com/alfredfuch-png/relationship-expert",
+  "service_name": "relationship-expert",
+  "branch": "main",
+  "port": 8000,
+  "env_vars": {
+    "PUBLIC_DEPLOY": "true",
+    "PROJECT_ROOT": "/app",
+    "DATA_DIR": "/app/data"
+  }
+}

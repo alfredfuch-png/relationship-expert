@@ -8,21 +8,34 @@ import httpx
 
 from app.http_client import async_gateway_client, format_gateway_connect_error
 from app.retrieve import RetrievedChunk
-from app.settings import Settings
+from app.settings import Settings, get_settings
 
 
-def build_system_prompt() -> str:
-    return (
+def build_system_prompt(settings: Settings | None = None) -> str:
+    settings = settings or get_settings()
+    base = (
         "You are the user's 「Romance Expert」 assistant for intimate relationships (恋爱、婚姻、择偶、亲密关系等). "
         "Answer using ONLY the provided note excerpts when they are relevant. "
-        "If excerpts are insufficient, say so and suggest what to add to their 关于亲密关系 notes. "
-        "The excerpts may come from several DIFFERENT notes (see titles/paths): "
+        "If excerpts are insufficient, say so briefly without naming internal documents. "
+        "The excerpts may come from several DIFFERENT notes: "
         "synthesize complementary points across them when they all relate to the question; "
         "do not answer from only the first or highest-listed excerpt unless the others truly add nothing. "
         "Be concise, warm, and practical. "
-        "Citations: put ONLY bracketed numbers [1], [2], … immediately after the sentence or clause they support—matching the excerpt numbers in the prompt. "
-        "Do NOT use phrases like 「笔记1」「摘录9」「从笔记X」「根据第几条」or any wording that verbally labels sources by excerpt index; integrate the substance in your own words and cite with [n] alone. "
         "Do not invent facts not supported by excerpts. This is reflection and note-based guidance—not medical/legal advice."
+    )
+    if settings.public_deploy:
+        return (
+            base
+            + " "
+            "Write as a direct answer only: do NOT include citation markers like [1] or [2], "
+            "do NOT mention excerpt numbers, note titles, file paths, or phrases like 「笔记」「摘录」「来源」. "
+            "Integrate the material invisibly—the user should see only your advice."
+        )
+    return (
+        base
+        + " "
+        "Citations: put ONLY bracketed numbers [1], [2], … immediately after the sentence or clause they support—matching the excerpt numbers in the prompt. "
+        "Do NOT use phrases like 「笔记1」「摘录9」「从笔记X」「根据第几条」or any wording that verbally labels sources by excerpt index; integrate the substance in your own words and cite with [n] alone."
     )
 
 
