@@ -44,6 +44,8 @@ def _merge_env_vars(cfg: dict) -> dict[str, str]:
         "INDEX_BUNDLE_URL",
         "USERS_DB_URL",
         "USERS_BOOTSTRAP",
+        "ALLOW_REGISTRATION",
+        "REGISTRATION_INVITE_CODE",
         "HTTPS_PROXY",
         "HTTP_PROXY",
     ):

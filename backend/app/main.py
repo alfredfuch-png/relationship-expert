@@ -19,16 +19,18 @@ from app.auth import (
     authenticate_login,
     clear_session_cookie,
     CurrentUserId,
+    registration_enabled,
     resolve_user,
     server_chat_enabled,
     set_session_cookie,
+    verify_registration_invite,
 )
 from app.chat import build_system_prompt, build_user_message, stream_chat_completion
 from app.indexing import read_index_meta, rebuild_index_async
 from app.retrieve import retrieve_context
 from app.settings import _project_root, get_settings
 from app.startup import prepare_runtime_data
-from app.users_store import load_chat_state, save_chat_state
+from app.users_store import create_user, load_chat_state, save_chat_state
 
 
 def _web_dist() -> Path:
@@ -77,6 +79,12 @@ class LoginBody(BaseModel):
     password: str = Field(min_length=1, max_length=256)
 
 
+class RegisterBody(BaseModel):
+    username: str = Field(min_length=2, max_length=32)
+    password: str = Field(min_length=4, max_length=256)
+    invite_code: str = Field(min_length=1, max_length=128)
+
+
 class ChatStateBody(BaseModel):
     threads: list[dict]
     active_id: str | None = None
@@ -94,6 +102,7 @@ def auth_status(request: Request) -> dict:
         "auth_mode": mode,
         "username": user.username if user else None,
         "server_chat": server_chat_enabled(s),
+        "registration_enabled": registration_enabled(s),
     }
 
 
@@ -122,6 +131,35 @@ def auth_login(body: LoginBody, response: Response) -> dict:
 def auth_logout(response: Response) -> dict:
     clear_session_cookie(response)
     return {"ok": True}
+
+
+@app.post("/api/auth/register")
+def auth_register(body: RegisterBody, response: Response) -> dict:
+    s = get_settings()
+    if not registration_enabled(s):
+        raise HTTPException(status_code=403, detail="注册未开放。")
+    if not verify_registration_invite(body.invite_code, s):
+        raise HTTPException(status_code=403, detail="邀请码无效。")
+    username = body.username.strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="账户名不能为空。")
+    try:
+        user = create_user(username, body.password, s)
+    except ValueError as exc:
+        msg = str(exc)
+        if "already exists" in msg:
+            raise HTTPException(status_code=409, detail="该账户名已被使用。") from exc
+        if "too short" in msg:
+            raise HTTPException(status_code=400, detail="密码至少 4 个字符。") from exc
+        raise HTTPException(status_code=400, detail="无法创建账户。") from exc
+    set_session_cookie(response, user, s)
+    return {
+        "ok": True,
+        "auth_required": True,
+        "auth_mode": auth_mode(s),
+        "username": user.username,
+        "server_chat": server_chat_enabled(s),
+    }
 
 
 @app.get("/api/config")

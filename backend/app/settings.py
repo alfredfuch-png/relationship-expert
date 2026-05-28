@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     # Optional HTTPS URL to download users.db for production (keeps accounts across redeploys).
     users_db_url: str = ""
 
+    # Self-service registration (requires registration_invite_code).
+    allow_registration: bool = False
+    registration_invite_code: str = ""
+
     ai_builder_token: str = ""
     ai_api_base_url: str = "https://space.ai-builders.com/backend/v1"
     ai_chat_model: str = "deepseek"

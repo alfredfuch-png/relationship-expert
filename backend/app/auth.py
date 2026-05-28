@@ -17,9 +17,24 @@ SESSION_V2_PREFIX = "v2."
 AuthMode = Literal["none", "shared_password", "accounts"]
 
 
+def registration_enabled(settings: Settings | None = None) -> bool:
+    settings = settings or get_settings()
+    return settings.allow_registration and bool(settings.registration_invite_code.strip())
+
+
+def verify_registration_invite(candidate: str, settings: Settings | None = None) -> bool:
+    settings = settings or get_settings()
+    expected = settings.registration_invite_code.strip()
+    if not expected:
+        return False
+    return hmac.compare_digest(candidate.strip(), expected)
+
+
 def auth_mode(settings: Settings | None = None) -> AuthMode:
     settings = settings or get_settings()
     if has_users(settings):
+        return "accounts"
+    if registration_enabled(settings):
         return "accounts"
     if settings.app_password.strip():
         return "shared_password"

@@ -73,9 +73,19 @@ Tag routing, multi-note retrieval, and tuning knobs match Digital Twin — see t
 
 ## 多账户登录（小范围分享）
 
-公开站可改为 **账户名 + 密码**，每位用户只能看到自己的对话记录（存在服务端 `data/users.db`）。
+公开站使用 **账户名 + 密码**，每位用户只能看到自己的对话记录（存在服务端 `data/users.db`）。
 
-**创建账户（本机）：**
+**推荐：邀请码自助注册**（在 `.env` 中设置，部署时由 `scripts/deploy.py` 注入）：
+
+```env
+ALLOW_REGISTRATION=true
+REGISTRATION_INVITE_CODE=你私下发给朋友的邀请码
+SESSION_SECRET=随机长字符串
+```
+
+访客打开网站 →「注册」→ 填账户名、密码、邀请码 → 自动登录。把邀请码私下发给要邀请的人即可。
+
+**或管理员手动建账户：**
 
 ```powershell
 cd backend
@@ -83,7 +93,7 @@ cd backend
 .\.venv\Scripts\python ..\scripts\manage_users.py list
 ```
 
-或在 `.env` 中设置（仅在 `users.db` 为空时生效一次）：
+或在 `.env` 中一次性引导（仅在 `users.db` 为空时）：
 
 ```env
 USERS_BOOTSTRAP=张三:pass1,李四:pass2
