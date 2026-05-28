@@ -11,6 +11,7 @@ type Props = {
 type AuthStatus = {
   auth_mode?: AuthMode
   registration_enabled?: boolean
+  registration_slots_remaining?: number | null
 }
 
 export default function Login({ onSuccess }: Props) {
@@ -21,6 +22,7 @@ export default function Login({ onSuccess }: Props) {
   const [password, setPassword] = useState('')
   const [passwordConfirm, setPasswordConfirm] = useState('')
   const [inviteCode, setInviteCode] = useState('')
+  const [slotsRemaining, setSlotsRemaining] = useState<number | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
@@ -32,6 +34,9 @@ export default function Login({ onSuccess }: Props) {
         if (o.registration_enabled) {
           setRegistrationOpen(true)
           setView('register')
+        }
+        if (typeof o.registration_slots_remaining === 'number') {
+          setSlotsRemaining(o.registration_slots_remaining)
         }
       })
       .catch(() => undefined)
@@ -144,7 +149,11 @@ export default function Login({ onSuccess }: Props) {
 
         <p>
           {isRegister
-            ? '填写邀请码创建账户，对话记录仅自己可见。'
+            ? slotsRemaining === null
+              ? '填写邀请码创建账户，对话记录仅自己可见。'
+              : slotsRemaining > 0
+                ? `填写邀请码创建账户（剩余 ${slotsRemaining} 个名额）。`
+                : '邀请码注册名额已用完，请联系管理员。'
             : accountsMode
               ? '使用账户名和密码登录。'
               : '请输入访问密码以使用亲密关系顾问。'}
@@ -212,7 +221,10 @@ export default function Login({ onSuccess }: Props) {
             loading ||
             !password.trim() ||
             ((accountsMode || isRegister) && !username.trim()) ||
-            (isRegister && (!inviteCode.trim() || !passwordConfirm.trim()))
+            (isRegister &&
+              (slotsRemaining === 0 ||
+                !inviteCode.trim() ||
+                !passwordConfirm.trim()))
           }
         >
           {loading ? '请稍候…' : isRegister ? '创建账户' : '进入'}

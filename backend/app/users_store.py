@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import uuid
@@ -10,6 +11,10 @@ from pathlib import Path
 import bcrypt
 
 from app.settings import Settings, get_settings
+
+
+class RegistrationInviteLimitError(Exception):
+    """Raised when the invite code has reached its maximum number of registrations."""
 
 
 @dataclass(frozen=True)
@@ -48,8 +53,109 @@ def init_db(settings: Settings | None = None) -> None:
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS registration_invite_state (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                invite_code_hash TEXT NOT NULL,
+                use_count INTEGER NOT NULL DEFAULT 0
+            );
             """
         )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _invite_code_hash(settings: Settings) -> str:
+    code = settings.registration_invite_code.strip()
+    return hashlib.sha256(code.encode("utf-8")).hexdigest()
+
+
+def _sync_invite_state_row(conn: sqlite3.Connection, code_hash: str) -> sqlite3.Row:
+    row = conn.execute(
+        "SELECT invite_code_hash, use_count FROM registration_invite_state WHERE id = 1"
+    ).fetchone()
+    if row is None:
+        conn.execute(
+            "INSERT INTO registration_invite_state (id, invite_code_hash, use_count) VALUES (1, ?, 0)",
+            (code_hash,),
+        )
+        row = conn.execute(
+            "SELECT invite_code_hash, use_count FROM registration_invite_state WHERE id = 1"
+        ).fetchone()
+    elif str(row["invite_code_hash"]) != code_hash:
+        conn.execute(
+            "UPDATE registration_invite_state SET invite_code_hash = ?, use_count = 0 WHERE id = 1",
+            (code_hash,),
+        )
+        row = conn.execute(
+            "SELECT invite_code_hash, use_count FROM registration_invite_state WHERE id = 1"
+        ).fetchone()
+    return row
+
+
+def registration_invite_usage(settings: Settings | None = None) -> tuple[int, int | None]:
+    """Return (use_count, max_uses). max_uses is None when unlimited."""
+    settings = settings or get_settings()
+    max_uses = settings.registration_invite_max_uses
+    limit: int | None = max_uses if max_uses > 0 else None
+    init_db(settings)
+    conn = _connect(settings)
+    try:
+        row = _sync_invite_state_row(conn, _invite_code_hash(settings))
+        conn.commit()
+        return int(row["use_count"]), limit
+    finally:
+        conn.close()
+
+
+def registration_slots_remaining(settings: Settings | None = None) -> int | None:
+    used, limit = registration_invite_usage(settings)
+    if limit is None:
+        return None
+    return max(0, limit - used)
+
+
+def consume_registration_slot(settings: Settings | None = None) -> None:
+    settings = settings or get_settings()
+    max_uses = settings.registration_invite_max_uses
+    if max_uses <= 0:
+        return
+    init_db(settings)
+    code_hash = _invite_code_hash(settings)
+    conn = _connect(settings)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = _sync_invite_state_row(conn, code_hash)
+        used = int(row["use_count"])
+        if used >= max_uses:
+            conn.rollback()
+            raise RegistrationInviteLimitError()
+        conn.execute(
+            "UPDATE registration_invite_state SET use_count = use_count + 1 WHERE id = 1"
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def release_registration_slot(settings: Settings | None = None) -> None:
+    settings = settings or get_settings()
+    if settings.registration_invite_max_uses <= 0:
+        return
+    init_db(settings)
+    conn = _connect(settings)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT use_count FROM registration_invite_state WHERE id = 1"
+        ).fetchone()
+        if row and int(row["use_count"]) > 0:
+            conn.execute(
+                "UPDATE registration_invite_state SET use_count = use_count - 1 WHERE id = 1"
+            )
         conn.commit()
     finally:
         conn.close()

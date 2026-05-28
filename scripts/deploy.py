@@ -46,6 +46,7 @@ def _merge_env_vars(cfg: dict) -> dict[str, str]:
         "USERS_BOOTSTRAP",
         "ALLOW_REGISTRATION",
         "REGISTRATION_INVITE_CODE",
+        "REGISTRATION_INVITE_MAX_USES",
         "HTTPS_PROXY",
         "HTTP_PROXY",
     ):

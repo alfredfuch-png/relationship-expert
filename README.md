@@ -80,8 +80,11 @@ Tag routing, multi-note retrieval, and tuning knobs match Digital Twin — see t
 ```env
 ALLOW_REGISTRATION=true
 REGISTRATION_INVITE_CODE=你私下发给朋友的邀请码
+REGISTRATION_INVITE_MAX_USES=30
 SESSION_SECRET=随机长字符串
 ```
+
+同一邀请码最多可成功注册 `REGISTRATION_INVITE_MAX_USES` 次（默认 30）。修改邀请码后计数会自动归零。
 
 访客打开网站 →「注册」→ 填账户名、密码、邀请码 → 自动登录。把邀请码私下发给要邀请的人即可。
 

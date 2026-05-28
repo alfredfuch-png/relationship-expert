@@ -30,7 +30,15 @@ from app.indexing import read_index_meta, rebuild_index_async
 from app.retrieve import retrieve_context
 from app.settings import _project_root, get_settings
 from app.startup import prepare_runtime_data
-from app.users_store import create_user, load_chat_state, save_chat_state
+from app.users_store import (
+    RegistrationInviteLimitError,
+    consume_registration_slot,
+    create_user,
+    load_chat_state,
+    registration_slots_remaining,
+    release_registration_slot,
+    save_chat_state,
+)
 
 
 def _web_dist() -> Path:
@@ -103,6 +111,9 @@ def auth_status(request: Request) -> dict:
         "username": user.username if user else None,
         "server_chat": server_chat_enabled(s),
         "registration_enabled": registration_enabled(s),
+        "registration_slots_remaining": registration_slots_remaining(s)
+        if registration_enabled(s)
+        else None,
     }
 
 
@@ -143,15 +154,27 @@ def auth_register(body: RegisterBody, response: Response) -> dict:
     username = body.username.strip()
     if not username:
         raise HTTPException(status_code=400, detail="账户名不能为空。")
+    max_uses = s.registration_invite_max_uses
+    try:
+        consume_registration_slot(s)
+    except RegistrationInviteLimitError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail=f"邀请码已达使用上限（{max_uses} 次）。",
+        ) from exc
     try:
         user = create_user(username, body.password, s)
     except ValueError as exc:
+        release_registration_slot(s)
         msg = str(exc)
         if "already exists" in msg:
             raise HTTPException(status_code=409, detail="该账户名已被使用。") from exc
         if "too short" in msg:
             raise HTTPException(status_code=400, detail="密码至少 4 个字符。") from exc
         raise HTTPException(status_code=400, detail="无法创建账户。") from exc
+    except Exception:
+        release_registration_slot(s)
+        raise
     set_session_cookie(response, user, s)
     return {
         "ok": True,

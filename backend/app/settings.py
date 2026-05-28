@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     # Self-service registration (requires registration_invite_code).
     allow_registration: bool = False
     registration_invite_code: str = ""
+    registration_invite_max_uses: int = 30
 
     ai_builder_token: str = ""
     ai_api_base_url: str = "https://space.ai-builders.com/backend/v1"
