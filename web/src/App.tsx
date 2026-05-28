@@ -146,7 +146,24 @@ async function streamChat(
     return
   }
   if (!res.ok || !res.body) {
-    onError(`Chat failed (${res.status})`)
+    let detail = ''
+    try {
+      detail = (await res.text()).trim().slice(0, 200)
+    } catch {
+      detail = ''
+    }
+    if (res.status === 503) {
+      onError(
+        detail ||
+          '服务暂时不可用（503）。常见于部署重启或网关超时，请稍等 1–2 分钟后刷新重试。',
+      )
+      return
+    }
+    if (res.status === 401) {
+      onError('登录已过期，请刷新页面重新登录。')
+      return
+    }
+    onError(detail ? `请求失败（${res.status}）：${detail}` : `请求失败（${res.status}）`)
     return
   }
   const reader = res.body.getReader()

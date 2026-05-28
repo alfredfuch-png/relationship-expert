@@ -266,6 +266,9 @@ async def run_index(user_id: CurrentUserId) -> dict:  # noqa: ARG001
 
 async def _ndjson_chat_events(message: str) -> AsyncIterator[bytes]:
     s = get_settings()
+    # Send an immediate line so reverse proxies (Koyeb / platform) see bytes quickly.
+    yield (json.dumps({"meta": {"status": "started"}}, ensure_ascii=False) + "\n").encode()
+
     data_dir = s.data_dir.resolve()
     meta = read_index_meta(data_dir)
 
@@ -276,7 +279,10 @@ async def _ndjson_chat_events(message: str) -> AsyncIterator[bytes]:
             meta=meta,
         )
     except RuntimeError as e:
-        yield (json.dumps({"error": str(e)}) + "\n").encode()
+        yield (json.dumps({"error": str(e)}, ensure_ascii=False) + "\n").encode()
+        return
+    except Exception as e:  # noqa: BLE001
+        yield (json.dumps({"error": f"检索失败：{e!s}"}, ensure_ascii=False) + "\n").encode()
         return
 
     if s.public_deploy:
