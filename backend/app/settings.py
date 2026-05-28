@@ -72,6 +72,8 @@ class Settings(BaseSettings):
     # then backfill to retrieve_top_k so context is not empty.
     retrieve_top_k: int = 12
     retrieve_max_chunks_per_note: int = 4
+    # Below this fused RRF score, retrieved chunks are treated as not relevant → general LLM answer.
+    rag_min_fused_score: float = 0.01
 
 
 def get_settings() -> Settings:

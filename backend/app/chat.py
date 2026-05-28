@@ -11,32 +11,69 @@ from app.retrieve import RetrievedChunk
 from app.settings import Settings, get_settings
 
 
-def build_system_prompt(settings: Settings | None = None) -> str:
+def filter_relevant_chunks(
+    chunks: list[RetrievedChunk],
+    settings: Settings | None = None,
+) -> list[RetrievedChunk]:
     settings = settings or get_settings()
-    base = (
-        "You are the user's 「Romance Expert」 assistant for intimate relationships (恋爱、婚姻、择偶、亲密关系等). "
-        "Answer using ONLY the provided note excerpts when they are relevant. "
-        "If excerpts are insufficient, say so briefly without naming internal documents. "
-        "The excerpts may come from several DIFFERENT notes: "
-        "synthesize complementary points across them when they all relate to the question; "
-        "do not answer from only the first or highest-listed excerpt unless the others truly add nothing. "
-        "Be concise, warm, and practical. "
-        "Do not invent facts not supported by excerpts. This is reflection and note-based guidance—not medical/legal advice."
-    )
+    if not chunks:
+        return []
+    floor = settings.rag_min_fused_score
+    if floor <= 0:
+        return list(chunks)
+    return [c for c in chunks if c.score >= floor]
+
+
+def chunks_are_relevant(
+    chunks: list[RetrievedChunk],
+    settings: Settings | None = None,
+) -> bool:
+    return len(filter_relevant_chunks(chunks, settings)) > 0
+
+
+def build_system_prompt(
+    settings: Settings | None = None,
+    *,
+    use_notes: bool = True,
+) -> str:
+    settings = settings or get_settings()
+    if use_notes:
+        base = (
+            "You are the user's 「Romance Expert」 assistant for intimate relationships (恋爱、婚姻、择偶、亲密关系等). "
+            "When the provided note excerpts clearly address the question, ground your answer in them. "
+            "When excerpts are only weakly related or do not cover the question, still answer helpfully from your "
+            "general expertise—do NOT refuse, and do NOT say the notes lack information or that you have nothing relevant. "
+            "The excerpts may come from several DIFFERENT notes: "
+            "synthesize complementary points across them when they all relate to the question. "
+            "Be concise, warm, and practical. "
+            "Do not invent personal facts about the user that are not in the excerpts. "
+            "This is reflection and relationship guidance—not medical/legal advice."
+        )
+    else:
+        base = (
+            "You are the user's 「Romance Expert」 assistant for intimate relationships (恋爱、婚姻、择偶、亲密关系等). "
+            "The personal note library did not return clearly relevant excerpts for this question. "
+            "Answer helpfully using your general expertise. "
+            "Be concise, warm, and practical. "
+            "Do not mention missing notes, an empty knowledge base, retrieval, or internal documents. "
+            "This is general relationship guidance—not medical/legal advice."
+        )
     if settings.public_deploy:
         return (
             base
             + " "
             "Write as a direct answer only: do NOT include citation markers like [1] or [2], "
             "do NOT mention excerpt numbers, note titles, file paths, or phrases like 「笔记」「摘录」「来源」. "
-            "Integrate the material invisibly—the user should see only your advice."
+            "Integrate any note material invisibly—the user should see only your advice."
         )
-    return (
-        base
-        + " "
-        "Citations: put ONLY bracketed numbers [1], [2], … immediately after the sentence or clause they support—matching the excerpt numbers in the prompt. "
-        "Do NOT use phrases like 「笔记1」「摘录9」「从笔记X」「根据第几条」or any wording that verbally labels sources by excerpt index; integrate the substance in your own words and cite with [n] alone."
-    )
+    if use_notes:
+        return (
+            base
+            + " "
+            "Citations: put ONLY bracketed numbers [1], [2], … immediately after the sentence or clause they support—matching the excerpt numbers in the prompt. "
+            "Do NOT use phrases like 「笔记1」「摘录9」「从笔记X」「根据第几条」or any wording that verbally labels sources by excerpt index; integrate the substance in your own words and cite with [n] alone."
+        )
+    return base
 
 
 def build_user_message(question: str, chunks: list[RetrievedChunk]) -> str:
@@ -50,6 +87,26 @@ def build_user_message(question: str, chunks: list[RetrievedChunk]) -> str:
         "Excerpts from the user's Obsidian notes (folder: 关于亲密关系 / intimate relationships):\n\n"
         f"{body}\n\nQuestion:\n{question}"
     )
+
+
+def build_chat_messages(
+    question: str,
+    chunks: list[RetrievedChunk],
+    settings: Settings | None = None,
+) -> tuple[list[dict[str, str]], bool]:
+    """Build OpenAI-style messages; returns (messages, rag_used)."""
+    settings = settings or get_settings()
+    relevant = filter_relevant_chunks(chunks, settings)
+    use_notes = len(relevant) > 0
+    if use_notes:
+        user_content = build_user_message(question, relevant)
+    else:
+        user_content = question.strip()
+    messages = [
+        {"role": "system", "content": build_system_prompt(settings, use_notes=use_notes)},
+        {"role": "user", "content": user_content},
+    ]
+    return messages, use_notes
 
 
 async def stream_chat_completion(

@@ -25,7 +25,7 @@ from app.auth import (
     set_session_cookie,
     verify_registration_invite,
 )
-from app.chat import build_system_prompt, build_user_message, stream_chat_completion
+from app.chat import build_chat_messages, filter_relevant_chunks, stream_chat_completion
 from app.indexing import read_index_meta, rebuild_index_async
 from app.retrieve import retrieve_context
 from app.settings import _project_root, get_settings
@@ -285,8 +285,18 @@ async def _ndjson_chat_events(message: str) -> AsyncIterator[bytes]:
         yield (json.dumps({"error": f"检索失败：{e!s}"}, ensure_ascii=False) + "\n").encode()
         return
 
+    relevant_chunks = filter_relevant_chunks(chunks, s)
+    messages, rag_used = build_chat_messages(message, chunks, s)
+    routing_info["rag_used"] = rag_used
+
     if s.public_deploy:
-        yield (json.dumps({"meta": {"public_deploy": True}}, ensure_ascii=False) + "\n").encode()
+        yield (
+            json.dumps(
+                {"meta": {"public_deploy": True, "rag_used": rag_used}},
+                ensure_ascii=False,
+            )
+            + "\n"
+        ).encode()
     else:
         ctx_lines = [
             {
@@ -296,16 +306,10 @@ async def _ndjson_chat_events(message: str) -> AsyncIterator[bytes]:
                 "heading_path": c.heading_path,
                 "source": c.source,
             }
-            for c in chunks
+            for c in relevant_chunks
         ]
         payload = {"sources": ctx_lines, "routing": routing_info}
         yield (json.dumps(payload, ensure_ascii=False) + "\n").encode()
-
-    user_content = build_user_message(message, chunks)
-    messages = [
-        {"role": "system", "content": build_system_prompt(s)},
-        {"role": "user", "content": user_content},
-    ]
 
     async for line in stream_chat_completion(s, messages):
         yield line.encode()
