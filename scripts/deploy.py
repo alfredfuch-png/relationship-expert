@@ -38,7 +38,15 @@ def _load_token() -> str:
 
 def _merge_env_vars(cfg: dict) -> dict[str, str]:
     env = dict(cfg.get("env_vars") or {})
-    for key in ("APP_PASSWORD", "SESSION_SECRET", "INDEX_BUNDLE_URL", "HTTPS_PROXY", "HTTP_PROXY"):
+    for key in (
+        "APP_PASSWORD",
+        "SESSION_SECRET",
+        "INDEX_BUNDLE_URL",
+        "USERS_DB_URL",
+        "USERS_BOOTSTRAP",
+        "HTTPS_PROXY",
+        "HTTP_PROXY",
+    ):
         val = _read_dotenv().get(key, "").strip()
         if val and key not in env:
             env[key] = val

@@ -105,6 +105,9 @@ type AppConfig = {
   show_routing: boolean
   allow_index: boolean
   auth_required?: boolean
+  auth_mode?: 'none' | 'shared_password' | 'accounts'
+  server_chat?: boolean
+  username?: string | null
 }
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -112,6 +115,7 @@ const DEFAULT_CONFIG: AppConfig = {
   show_sources: true,
   show_routing: true,
   allow_index: true,
+  server_chat: false,
 }
 
 function useAppConfig() {
@@ -186,24 +190,96 @@ async function streamChat(
   }
 }
 
+function emptyThread(): ChatThread {
+  const id = newId()
+  return { id, title: '新对话', messages: [], updatedAt: Date.now() }
+}
+
 export default function App() {
   const appConfig = useAppConfig()
   const { status, loading: statusLoading, refresh } = useIndexStatus()
   const [indexing, setIndexing] = useState(false)
+  const [threadsLoaded, setThreadsLoaded] = useState(!DEFAULT_CONFIG.server_chat)
   const [threads, setThreads] = useState<ChatThread[]>(() => {
     const saved = loadPersisted()
-    if (saved) return capThreads(saved.threads)
-    const id = newId()
-    return [{ id, title: '新对话', messages: [], updatedAt: Date.now() }]
+    if (saved?.threads.length) return capThreads(saved.threads)
+    return [emptyThread()]
   })
-  const [activeId, setActiveId] = useState(() => loadPersisted()?.activeId ?? threads[0]?.id ?? newId())
+  const [activeId, setActiveId] = useState(() => {
+    const saved = loadPersisted()
+    if (saved?.activeId) return saved.activeId
+    return newId()
+  })
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
 
+  const serverChat = Boolean(appConfig.server_chat)
+
   useEffect(() => {
+    if (!serverChat) {
+      const saved = loadPersisted()
+      if (saved?.threads.length) {
+        setThreads(capThreads(saved.threads))
+        setActiveId(saved.activeId)
+      } else {
+        const t = emptyThread()
+        setThreads([t])
+        setActiveId(t.id)
+      }
+      setThreadsLoaded(true)
+      return
+    }
+
+    let cancelled = false
+    fetch('/api/chat/state', { credentials: 'include' })
+      .then((r) => {
+        if (!r.ok) throw new Error(String(r.status))
+        return r.json()
+      })
+      .then((state: { threads?: ChatThread[]; active_id?: string | null }) => {
+        if (cancelled) return
+        const list =
+          Array.isArray(state.threads) && state.threads.length
+            ? capThreads(state.threads)
+            : [emptyThread()]
+        const aid =
+          state.active_id && list.some((t) => t.id === state.active_id)
+            ? state.active_id
+            : list[0]!.id
+        setThreads(list)
+        setActiveId(aid)
+      })
+      .catch(() => {
+        if (!cancelled) {
+          const t = emptyThread()
+          setThreads([t])
+          setActiveId(t.id)
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setThreadsLoaded(true)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [serverChat])
+
+  useEffect(() => {
+    if (!threadsLoaded) return
+    if (serverChat) {
+      const timer = window.setTimeout(() => {
+        void fetch('/api/chat/state', {
+          method: 'PUT',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ threads, active_id: activeId }),
+        })
+      }, 700)
+      return () => window.clearTimeout(timer)
+    }
     localStorage.setItem(LS_KEY, JSON.stringify({ threads, activeId }))
-  }, [threads, activeId])
+  }, [threads, activeId, serverChat, threadsLoaded])
 
   const activeThread = threads.find((t) => t.id === activeId)
   const messages = activeThread?.messages ?? []
@@ -439,7 +515,14 @@ export default function App() {
         )}
 
         <footer className="sidebar-foot muted small">
-          对话模型：deepseek · 可先按标签收窄再检索上下文
+          {appConfig.username ? (
+            <span>
+              已登录：<strong>{appConfig.username}</strong>
+              {serverChat ? ' · 对话已云端保存' : ''}
+            </span>
+          ) : (
+            <span>对话模型：deepseek · 可先按标签收窄再检索上下文</span>
+          )}
           {appConfig.auth_required ? (
             <button
               type="button"
@@ -551,7 +634,7 @@ export default function App() {
               ready ? '输入问题（恋爱、婚姻、沟通、边界……）' : '请先构建索引再发送'
             }
             value={input}
-            disabled={!ready || sending}
+            disabled={!ready || sending || !threadsLoaded}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
@@ -560,7 +643,11 @@ export default function App() {
               }
             }}
           />
-          <button type="submit" className="btn send" disabled={!ready || sending || !input.trim()}>
+          <button
+            type="submit"
+            className="btn send"
+            disabled={!ready || sending || !input.trim() || !threadsLoaded}
+          >
             发送
           </button>
         </form>

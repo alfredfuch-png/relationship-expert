@@ -7,5 +7,9 @@ if (-not (Test-Path (Join-Path $data "chunks.jsonl"))) {
     exit 1
 }
 if (Test-Path $out) { Remove-Item $out -Force }
-Compress-Archive -Path (Join-Path $data "*") -DestinationPath $out
-Write-Host "Created $out — upload privately and set INDEX_BUNDLE_URL in deploy env_vars."
+$items = Get-ChildItem (Join-Path $data "*")
+Compress-Archive -Path $items.FullName -DestinationPath $out -Force
+if (Test-Path (Join-Path $data "users.db")) {
+    Write-Host "Included users.db in archive (per-account chat + logins)."
+}
+Write-Host "Created $out — upload and set INDEX_BUNDLE_URL in deploy env_vars."

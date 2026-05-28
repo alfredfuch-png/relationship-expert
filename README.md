@@ -71,6 +71,28 @@ Tag routing, multi-note retrieval, and tuning knobs match Digital Twin — see t
 - **`.env` 与 `data/` 已忽略**：含 API Token 与本地索引（`chunks.jsonl`、`embeddings.npz`），克隆者拿不到你的密钥和已建索引。
 - **其他人如何使用**：克隆后复制 `.env.example` → `.env`，填自己的 `AI_BUILDER_TOKEN`，把 `VAULT_PATH` 改成**他们自己的**笔记目录，再「构建索引」即可；没有你的笔记也能跑，只是回答基于他们自己的内容。
 
+## 多账户登录（小范围分享）
+
+公开站可改为 **账户名 + 密码**，每位用户只能看到自己的对话记录（存在服务端 `data/users.db`）。
+
+**创建账户（本机）：**
+
+```powershell
+cd backend
+.\.venv\Scripts\python ..\scripts\manage_users.py add 张三 your-password
+.\.venv\Scripts\python ..\scripts\manage_users.py list
+```
+
+或在 `.env` 中设置（仅在 `users.db` 为空时生效一次）：
+
+```env
+USERS_BOOTSTRAP=张三:pass1,李四:pass2
+```
+
+**上线时保留账户库：** 把 `data/users.db` 打进索引包（`.\scripts\package_index.ps1` 会自动包含），重新上传 Release 后部署；或单独设置 `USERS_DB_URL` 指向私密下载地址。
+
+部署脚本会从 `.env` 注入 `USERS_BOOTSTRAP`、`USERS_DB_URL`（勿提交真实密码到 GitHub）。
+
 ## Deploy（AI Builders Space）
 
 公开托管遵循 [AI Builders 部署说明](https://www.ai-builders.com/resources/students-backend/openapi.json)：单进程、根目录 `Dockerfile`、`PORT` 环境变量、静态前端由 FastAPI 同端口提供。

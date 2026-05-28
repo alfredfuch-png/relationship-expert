@@ -30,10 +30,14 @@ class Settings(BaseSettings):
     # Optional HTTPS URL to a zip of pre-built data/ (chunks + embeddings) for production.
     index_bundle_url: str = ""
 
-    # When set, visitors must log in (cookie session). Use APP_PASSWORD in deploy env_vars / .env.
+    # Legacy single shared password (used only when no accounts exist in users.db).
     app_password: str = ""
     session_secret: str = ""
     cookie_secure: bool = False
+    # Bootstrap accounts on first start if users.db is empty: "alice:pass,bob:pass2"
+    users_bootstrap: str = ""
+    # Optional HTTPS URL to download users.db for production (keeps accounts across redeploys).
+    users_db_url: str = ""
 
     ai_builder_token: str = ""
     ai_api_base_url: str = "https://space.ai-builders.com/backend/v1"

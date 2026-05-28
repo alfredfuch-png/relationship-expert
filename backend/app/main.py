@@ -15,19 +15,20 @@ from pydantic import BaseModel, Field
 
 from app.auth import (
     auth_enabled,
+    auth_mode,
+    authenticate_login,
     clear_session_cookie,
-    require_session,
+    CurrentUserId,
+    resolve_user,
+    server_chat_enabled,
     set_session_cookie,
-    verify_password,
-    verify_session,
 )
 from app.chat import build_system_prompt, build_user_message, stream_chat_completion
 from app.indexing import read_index_meta, rebuild_index_async
 from app.retrieve import retrieve_context
 from app.settings import _project_root, get_settings
-from app.startup import ensure_index_bundle
-
-SessionDep = Annotated[None, Depends(require_session)]
+from app.startup import prepare_runtime_data
+from app.users_store import load_chat_state, save_chat_state
 
 
 def _web_dist() -> Path:
@@ -52,7 +53,7 @@ def _cors_origins() -> list[str]:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    ensure_index_bundle()
+    prepare_runtime_data()
     yield
 
 
@@ -72,28 +73,49 @@ class ChatBody(BaseModel):
 
 
 class LoginBody(BaseModel):
+    username: str = Field(default="", max_length=64)
     password: str = Field(min_length=1, max_length=256)
+
+
+class ChatStateBody(BaseModel):
+    threads: list[dict]
+    active_id: str | None = None
 
 
 @app.get("/api/auth/status")
 def auth_status(request: Request) -> dict:
     s = get_settings()
+    mode = auth_mode(s)
     enabled = auth_enabled(s)
+    user = resolve_user(request, s) if enabled else None
     return {
         "auth_required": enabled,
-        "authenticated": verify_session(request.cookies.get("re_session"), s) if enabled else True,
+        "authenticated": user is not None if enabled else True,
+        "auth_mode": mode,
+        "username": user.username if user else None,
+        "server_chat": server_chat_enabled(s),
     }
 
 
 @app.post("/api/auth/login")
 def auth_login(body: LoginBody, response: Response) -> dict:
     s = get_settings()
+    mode = auth_mode(s)
     if not auth_enabled(s):
-        return {"ok": True, "auth_required": False}
-    if not verify_password(body.password, s):
+        return {"ok": True, "auth_required": False, "auth_mode": "none"}
+    user = authenticate_login(username=body.username, password=body.password, settings=s)
+    if not user:
+        if mode == "accounts":
+            raise HTTPException(status_code=401, detail="账户名或密码错误")
         raise HTTPException(status_code=401, detail="密码错误")
-    set_session_cookie(response, s)
-    return {"ok": True, "auth_required": True}
+    set_session_cookie(response, user, s)
+    return {
+        "ok": True,
+        "auth_required": True,
+        "auth_mode": mode,
+        "username": user.username,
+        "server_chat": server_chat_enabled(s),
+    }
 
 
 @app.post("/api/auth/logout")
@@ -103,15 +125,42 @@ def auth_logout(response: Response) -> dict:
 
 
 @app.get("/api/config")
-def public_config(_session: SessionDep) -> dict:
+def public_config(request: Request, user_id: CurrentUserId) -> dict:  # noqa: ARG001
     s = get_settings()
+    user = resolve_user(request, s)
     return {
         "public_deploy": s.public_deploy,
         "show_sources": not s.public_deploy,
         "show_routing": not s.public_deploy,
         "allow_index": not s.public_deploy,
         "auth_required": auth_enabled(s),
+        "auth_mode": auth_mode(s),
+        "server_chat": server_chat_enabled(s),
+        "username": user.username if user else None,
     }
+
+
+@app.get("/api/chat/state")
+def get_chat_state(user_id: CurrentUserId) -> dict:
+    if not server_chat_enabled():
+        raise HTTPException(status_code=404, detail="Server chat storage is not enabled.")
+    if user_id in ("anonymous", "shared"):
+        return {"threads": [], "active_id": None}
+    state = load_chat_state(user_id) or {"threads": [], "active_id": None}
+    return state
+
+
+@app.put("/api/chat/state")
+def put_chat_state(body: ChatStateBody, user_id: CurrentUserId) -> dict:
+    if not server_chat_enabled():
+        raise HTTPException(status_code=404, detail="Server chat storage is not enabled.")
+    if user_id in ("anonymous", "shared"):
+        raise HTTPException(status_code=400, detail="Chat sync requires a personal account.")
+    save_chat_state(
+        user_id,
+        {"threads": body.threads, "active_id": body.active_id},
+    )
+    return {"ok": True}
 
 
 @app.get("/api/health")
@@ -128,7 +177,7 @@ def health() -> dict[str, str]:
 
 
 @app.get("/api/index/status")
-def index_status(_session: SessionDep) -> dict:
+def index_status(user_id: CurrentUserId) -> dict:  # noqa: ARG001
     s = get_settings()
     meta = read_index_meta(s.data_dir.resolve())
     if s.public_deploy:
@@ -142,7 +191,7 @@ def index_status(_session: SessionDep) -> dict:
 
 
 @app.post("/api/index")
-async def run_index(_session: SessionDep) -> dict:
+async def run_index(user_id: CurrentUserId) -> dict:  # noqa: ARG001
     s = get_settings()
     if s.public_deploy:
         raise HTTPException(status_code=403, detail="Indexing is disabled on the public deployment.")
@@ -196,7 +245,7 @@ async def _ndjson_chat_events(message: str) -> AsyncIterator[bytes]:
 
 
 @app.post("/api/chat")
-async def chat(body: ChatBody, _session: SessionDep) -> StreamingResponse:
+async def chat(body: ChatBody, user_id: CurrentUserId) -> StreamingResponse:  # noqa: ARG001
     return StreamingResponse(
         _ndjson_chat_events(body.message),
         media_type="application/x-ndjson",

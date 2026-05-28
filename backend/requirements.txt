@@ -5,3 +5,4 @@ pydantic-settings==2.6.1
 python-frontmatter==1.1.0
 rank-bm25==0.2.2
 numpy>=2.0.0
+bcrypt>=4.2.0
