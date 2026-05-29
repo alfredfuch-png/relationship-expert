@@ -153,7 +153,7 @@ def auth_logout(response: Response) -> dict:
 def auth_register(
     body: RegisterBody,
     response: Response,
-    background_tasks: BackgroundTasks,
+    background_tasks: BackgroundTasks,  # noqa: ARG001 — kept for API stability
 ) -> dict:
     s = get_settings()
     if not registration_enabled(s):
@@ -185,14 +185,19 @@ def auth_register(
         release_registration_slot(s)
         raise
     set_session_cookie(response, user, s)
+    backed_up = False
     if r2_sync_configured(s):
-        background_tasks.add_task(schedule_users_db_sync, s, True)
+        try:
+            backed_up = sync_users_db_to_r2(s, force=True)
+        except Exception:
+            backed_up = False
     return {
         "ok": True,
         "auth_required": True,
         "auth_mode": auth_mode(s),
         "username": user.username,
         "server_chat": server_chat_enabled(s),
+        "users_backed_up": backed_up,
     }
 
 

@@ -38,7 +38,11 @@ def r2_sync_configured(settings: Settings | None = None) -> bool:
 
 def sync_secret(settings: Settings | None = None) -> str:
     settings = settings or get_settings()
-    return settings.users_db_sync_secret.strip() or settings.app_password.strip()
+    return (
+        settings.users_db_sync_secret.strip()
+        or settings.session_secret.strip()
+        or settings.app_password.strip()
+    )
 
 
 def _users_zip_bytes(db_path: Path) -> bytes:
