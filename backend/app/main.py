@@ -66,7 +66,10 @@ def _cors_origins() -> list[str]:
 async def lifespan(_app: FastAPI):
     prepare_runtime_data()
     yield
-    sync_users_db_to_r2(get_settings(), force=True)
+    try:
+        sync_users_db_to_r2(get_settings(), force=True)
+    except Exception:
+        pass
 
 
 app = FastAPI(title="Romance Expert RAG", version="0.1.0", lifespan=lifespan)

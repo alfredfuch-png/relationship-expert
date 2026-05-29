@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import io
+import logging
 import zipfile
 from pathlib import Path
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+logger = logging.getLogger(__name__)
 
 from app.indexing import read_index_meta
 from app.settings import Settings, get_settings
@@ -75,15 +79,24 @@ def ensure_users_db(settings: Settings | None = None) -> None:
 
     url = (settings.users_db_url or "").strip()
     if url:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        payload = _fetch_url(url, settings)
-        if payload[:2] == b"PK":
-            if not _extract_users_db_from_zip(payload, path):
-                raise RuntimeError("users.db not found inside zip from USERS_DB_URL")
-        else:
-            path.write_bytes(payload)
-        init_db(settings)
-        return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = _fetch_url(url, settings)
+            if payload[:2] == b"PK":
+                if not _extract_users_db_from_zip(payload, path):
+                    logger.warning("users.db not found inside zip from USERS_DB_URL")
+                else:
+                    init_db(settings)
+                    return
+            else:
+                path.write_bytes(payload)
+                init_db(settings)
+                return
+        except (HTTPError, URLError, TimeoutError, RuntimeError, OSError) as exc:
+            logger.warning(
+                "Could not restore users.db from USERS_DB_URL (%s); starting with empty database.",
+                exc,
+            )
 
     if _restore_users_db_from_index_bundle(settings):
         return
