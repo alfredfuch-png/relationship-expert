@@ -30,7 +30,7 @@ from app.indexing import read_index_meta, rebuild_index_async
 from app.retrieve import retrieve_context
 from app.settings import _project_root, get_settings
 from app.startup import prepare_runtime_data
-from app.users_db_sync import r2_sync_configured, schedule_users_db_sync, sync_users_db_to_r2
+from app.users_db_sync import r2_sync_configured, schedule_users_db_sync, sync_secret, sync_users_db_to_r2
 from app.users_store import (
     RegistrationInviteLimitError,
     consume_registration_slot,
@@ -243,7 +243,7 @@ def put_chat_state(
 def admin_sync_users_db(request: Request) -> dict:
     """One-shot backup of users.db to R2 (header X-Sync-Secret)."""
     s = get_settings()
-    secret = s.users_db_sync_secret.strip()
+    secret = sync_secret(s)
     if not secret:
         raise HTTPException(status_code=404, detail="Not found")
     if request.headers.get("X-Sync-Secret", "") != secret:
@@ -256,12 +256,14 @@ def admin_sync_users_db(request: Request) -> dict:
 
 
 @app.get("/api/health")
-def health() -> dict[str, str]:
+def health() -> dict:
     s = get_settings()
-    out: dict[str, str] = {
+    out: dict = {
         "status": "ok",
         "chat_model": s.ai_chat_model,
         "embedding_model": s.ai_embedding_model,
+        "users_db_url_set": bool(s.users_db_url.strip()),
+        "backup_r2_configured": r2_sync_configured(s),
     }
     if not s.public_deploy:
         out["vault"] = str(s.vault_path)

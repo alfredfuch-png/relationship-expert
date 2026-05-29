@@ -20,14 +20,25 @@ _last_sync_at = 0.0
 MIN_INTERVAL_SEC = 90.0
 
 
+def _r2_settings(settings: Settings) -> tuple[str, str, str, str, str]:
+    return (
+        settings.backup_r2_account_id.strip(),
+        settings.backup_r2_access_key_id.strip(),
+        settings.backup_r2_secret_access_key.strip(),
+        settings.backup_r2_bucket_name.strip(),
+        settings.backup_r2_object_key.strip() or "relationship-expert-users.zip",
+    )
+
+
 def r2_sync_configured(settings: Settings | None = None) -> bool:
     settings = settings or get_settings()
-    return bool(
-        settings.r2_account_id.strip()
-        and settings.r2_access_key_id.strip()
-        and settings.r2_secret_access_key.strip()
-        and settings.r2_bucket_name.strip()
-    )
+    account, key_id, secret, bucket, _obj = _r2_settings(settings)
+    return bool(account and key_id and secret and bucket)
+
+
+def sync_secret(settings: Settings | None = None) -> str:
+    settings = settings or get_settings()
+    return settings.users_db_sync_secret.strip() or settings.app_password.strip()
 
 
 def _users_zip_bytes(db_path: Path) -> bytes:
@@ -38,12 +49,13 @@ def _users_zip_bytes(db_path: Path) -> bytes:
 
 
 def _r2_client(settings: Settings):
-    endpoint = f"https://{settings.r2_account_id.strip()}.r2.cloudflarestorage.com"
+    account, key_id, secret, _bucket, _obj = _r2_settings(settings)
+    endpoint = f"https://{account}.r2.cloudflarestorage.com"
     return boto3.client(
         "s3",
         endpoint_url=endpoint,
-        aws_access_key_id=settings.r2_access_key_id.strip(),
-        aws_secret_access_key=settings.r2_secret_access_key.strip(),
+        aws_access_key_id=key_id,
+        aws_secret_access_key=secret,
         config=Config(signature_version="s3v4"),
         region_name="auto",
     )
@@ -64,17 +76,18 @@ def sync_users_db_to_r2(settings: Settings | None = None, *, force: bool = False
     if not db_path.is_file():
         return False
 
+    _account, _key_id, _secret, bucket, obj_key = _r2_settings(settings)
+
     with _lock:
         now = time.monotonic()
         if not force and now - _last_sync_at < MIN_INTERVAL_SEC:
             return False
         try:
             payload = _users_zip_bytes(db_path)
-            key = settings.r2_users_object_key.strip() or "relationship-expert-users.zip"
             client = _r2_client(settings)
             client.put_object(
-                Bucket=settings.r2_bucket_name.strip(),
-                Key=key,
+                Bucket=bucket,
+                Key=obj_key,
                 Body=payload,
                 ContentType="application/zip",
             )
