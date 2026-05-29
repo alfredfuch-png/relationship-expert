@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import zipfile
+from pathlib import Path
 from urllib.request import urlopen
 
 from app.indexing import read_index_meta
@@ -28,12 +29,43 @@ def ensure_index_bundle(settings: Settings | None = None) -> None:
         zf.extractall(data_dir)
 
 
+def _extract_users_db_from_zip(payload: bytes, dest: Path) -> bool:
+    if payload[:2] != b"PK":
+        return False
+    with zipfile.ZipFile(io.BytesIO(payload)) as zf:
+        for name in zf.namelist():
+            if name.endswith("users.db"):
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(zf.read(name))
+                return True
+    return False
+
+
+def _restore_users_db_from_index_bundle(settings: Settings) -> bool:
+    """If users.db is missing, try to pull it from INDEX_BUNDLE_URL (when the zip includes it)."""
+    path = users_db_path(settings)
+    if path.is_file():
+        return False
+    url = (settings.index_bundle_url or "").strip()
+    if not url:
+        return False
+    with urlopen(url, timeout=120) as resp:  # noqa: S310
+        payload = resp.read()
+    if _extract_users_db_from_zip(payload, path):
+        init_db(settings)
+        return True
+    return False
+
+
 def ensure_users_db(settings: Settings | None = None) -> None:
     """Download users.db from USERS_DB_URL when the local file is missing."""
     settings = settings or get_settings()
     path = users_db_path(settings)
     if path.is_file():
         init_db(settings)
+        return
+
+    if _restore_users_db_from_index_bundle(settings):
         return
 
     url = (settings.users_db_url or "").strip()
