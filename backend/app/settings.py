@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     users_bootstrap: str = ""
     # Optional HTTPS URL to download users.db for production (keeps accounts across redeploys).
     users_db_url: str = ""
+    # Optional Bearer token when fetching USERS_DB_URL (private object storage / API).
+    users_db_bearer_token: str = ""
 
     # Self-service registration (requires registration_invite_code).
     allow_registration: bool = False

@@ -43,6 +43,7 @@ def _merge_env_vars(cfg: dict) -> dict[str, str]:
         "SESSION_SECRET",
         "INDEX_BUNDLE_URL",
         "USERS_DB_URL",
+        "USERS_DB_BEARER_TOKEN",
         "USERS_BOOTSTRAP",
         "ALLOW_REGISTRATION",
         "REGISTRATION_INVITE_CODE",
@@ -87,7 +88,11 @@ def main() -> None:
     print(f"HTTP {resp.status_code}")
     try:
         data = resp.json()
-        print(json.dumps(data, indent=2, ensure_ascii=False))
+        out = json.dumps(data, indent=2, ensure_ascii=False)
+        try:
+            print(out)
+        except UnicodeEncodeError:
+            print(out.encode("utf-8", errors="replace").decode("utf-8"))
     except json.JSONDecodeError:
         print(resp.text[:2000])
     if resp.status_code >= 400:

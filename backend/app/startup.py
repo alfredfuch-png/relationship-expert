@@ -3,11 +3,21 @@ from __future__ import annotations
 import io
 import zipfile
 from pathlib import Path
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from app.indexing import read_index_meta
 from app.settings import Settings, get_settings
 from app.users_store import bootstrap_users, has_users, init_db, users_db_path
+
+
+def _fetch_url(url: str, settings: Settings, *, timeout: int = 120) -> bytes:
+    headers: dict[str, str] = {}
+    token = (settings.users_db_bearer_token or "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = Request(url, headers=headers)
+    with urlopen(req, timeout=timeout) as resp:  # noqa: S310
+        return resp.read()
 
 
 def ensure_index_bundle(settings: Settings | None = None) -> None:
@@ -23,8 +33,7 @@ def ensure_index_bundle(settings: Settings | None = None) -> None:
         return
 
     data_dir.mkdir(parents=True, exist_ok=True)
-    with urlopen(url, timeout=120) as resp:  # noqa: S310
-        payload = resp.read()
+    payload = _fetch_url(url, settings)
     with zipfile.ZipFile(io.BytesIO(payload)) as zf:
         zf.extractall(data_dir)
 
@@ -42,15 +51,14 @@ def _extract_users_db_from_zip(payload: bytes, dest: Path) -> bool:
 
 
 def _restore_users_db_from_index_bundle(settings: Settings) -> bool:
-    """If users.db is missing, try to pull it from INDEX_BUNDLE_URL (when the zip includes it)."""
+    """Legacy: only if an old public index zip still contains users.db."""
     path = users_db_path(settings)
     if path.is_file():
         return False
     url = (settings.index_bundle_url or "").strip()
     if not url:
         return False
-    with urlopen(url, timeout=120) as resp:  # noqa: S310
-        payload = resp.read()
+    payload = _fetch_url(url, settings)
     if _extract_users_db_from_zip(payload, path):
         init_db(settings)
         return True
@@ -58,33 +66,28 @@ def _restore_users_db_from_index_bundle(settings: Settings) -> bool:
 
 
 def ensure_users_db(settings: Settings | None = None) -> None:
-    """Download users.db from USERS_DB_URL when the local file is missing."""
+    """Restore users.db from USERS_DB_URL (private), not from public index bundle."""
     settings = settings or get_settings()
     path = users_db_path(settings)
     if path.is_file():
         init_db(settings)
         return
 
-    if _restore_users_db_from_index_bundle(settings):
-        return
-
     url = (settings.users_db_url or "").strip()
-    if not url:
+    if url:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = _fetch_url(url, settings)
+        if payload[:2] == b"PK":
+            if not _extract_users_db_from_zip(payload, path):
+                raise RuntimeError("users.db not found inside zip from USERS_DB_URL")
+        else:
+            path.write_bytes(payload)
         init_db(settings)
         return
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with urlopen(url, timeout=120) as resp:  # noqa: S310
-        payload = resp.read()
-    if payload[:2] == b"PK":
-        with zipfile.ZipFile(io.BytesIO(payload)) as zf:
-            for name in zf.namelist():
-                if name.endswith("users.db"):
-                    path.write_bytes(zf.read(name))
-                    init_db(settings)
-                    return
-        raise RuntimeError("users.db not found inside zip from USERS_DB_URL")
-    path.write_bytes(payload)
+    if _restore_users_db_from_index_bundle(settings):
+        return
+
     init_db(settings)
 
 
