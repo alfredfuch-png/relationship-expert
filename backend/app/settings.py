@@ -40,6 +40,14 @@ class Settings(BaseSettings):
     users_db_url: str = ""
     # Optional Bearer token when fetching USERS_DB_URL (private object storage / API).
     users_db_bearer_token: str = ""
+    # Auto-upload users.db to Cloudflare R2 after register / chat save (S3 API credentials).
+    r2_account_id: str = ""
+    r2_access_key_id: str = ""
+    r2_secret_access_key: str = ""
+    r2_bucket_name: str = ""
+    r2_users_object_key: str = "relationship-expert-users.zip"
+    # Optional: POST /api/admin/sync-users-db with header X-Sync-Secret (one-shot backup).
+    users_db_sync_secret: str = ""
 
     # Self-service registration (requires registration_invite_code).
     allow_registration: bool = False

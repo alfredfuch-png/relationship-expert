@@ -1,45 +1,83 @@
-# 私密备份 users.db
+# 私密备份 users.db（自动同步到 Cloudflare R2）
 
-账户与对话存在 `data/users.db`。公开站重新部署后容器会清空，需从**私密**地址恢复。
+账户与对话在服务端 `data/users.db`。**你不需要知道用户的密码**——服务器会在注册、保存对话后自动上传到 R2。
 
-## 打包
+## 一次性配置（Cloudflare R2）
 
-```powershell
-.\scripts\package_users_db.ps1
-```
+### 1. 创建 API Token
 
-生成 `relationship-expert-users.zip`（仅含 `users.db`）。**不要**上传到公开 GitHub Release。
+Cloudflare 控制台 → **R2** → **Manage R2 API Tokens** → **Create API token**
 
-## 上传到哪里
+- 权限：**Object Read & Write**
+- 限定到你的 bucket（例如 `relationship-expert-private`）
 
-任选一种**外人无法随意列举/下载**的方式：
+记下：
 
-| 方式 | 说明 |
-|------|------|
-| 云对象存储 | 阿里云 OSS / 腾讯云 COS / Cloudflare R2：对象设为私有，使用**带过期时间的签名 URL** 或仅服务端知道的直链 |
-| 私有仓库 + Token | 私有 GitHub 仓库的 Release 资产需 API + `USERS_DB_BEARER_TOKEN`，不要用浏览器公开链接 |
-| 本机暂不上云 | 仅适合本地开发；线上必须提供 `USERS_DB_URL` |
+- **Account ID**（R2 概览页右侧）
+- **Access Key ID**
+- **Secret Access Key**
 
-得到 HTTPS 地址后写入 `.env`：
+### 2. 公开下载链接（给服务器拉取用）
+
+Bucket → **Settings** → 开启 **Public access**（R2.dev 子域）  
+上传对象名：`relationship-expert-users.zip`（首次可空 zip，或等自动同步）
+
+复制对象 URL，例如：
+
+`https://pub-xxxx.r2.dev/relationship-expert-users.zip`
+
+### 3. 写入 `.env`（勿提交 GitHub）
 
 ```env
-USERS_DB_URL=https://...
-# USERS_DB_BEARER_TOKEN=   # 可选
+# 冷启动时从 R2 下载恢复
+USERS_DB_URL=https://pub-xxxx.r2.dev/relationship-expert-users.zip
+
+# 注册 / 保存对话后自动上传（S3 API）
+R2_ACCOUNT_ID=你的AccountID
+R2_ACCESS_KEY_ID=...
+R2_SECRET_ACCESS_KEY=...
+R2_BUCKET_NAME=relationship-expert-private
+R2_USERS_OBJECT_KEY=relationship-expert-users.zip
+
+# 可选：手动触发一次备份（见下文）
+USERS_DB_SYNC_SECRET=随机长字符串
 ```
 
-然后：
+### 4. 部署
 
 ```powershell
 cd backend
 .\.venv\Scripts\python ..\scripts\deploy.py
 ```
 
-## 日常维护
+## 日常流程（无需本机建账户）
 
-- 有新用户注册或重要对话后：重新 `package_users_db.ps1`，覆盖私密 zip，再部署（或只更新存储里的文件）。
-- 公开索引更新：`package_index.ps1` → 上传公开 Release → 与账户库分开维护。
+| 事件 | 服务器行为 |
+|------|------------|
+| 用户 **注册** | 写入 `users.db` → **立即上传 R2** |
+| 用户 **聊天**（自动保存） | 更新 `users.db` → 约每 90 秒最多上传一次 |
+| **重新部署** | 从 `USERS_DB_URL` 下载 zip → 账户与对话恢复 |
+
+**你不需要**在其他用户注册后在本机 `manage_users.py add`。
+
+## 把当前线上的 alfredcfu 备份进 R2（仅一次）
+
+在配置好 R2 并部署**新代码之前**，若线上已有用户但 R2 仍为空，可先手动触发：
+
+```powershell
+$secret = "你在.env里设的USERS_DB_SYNC_SECRET"
+Invoke-WebRequest -Method POST `
+  -Uri "https://relationship-expert.ai-builders.space/api/admin/sync-users-db" `
+  -Headers @{ "X-Sync-Secret" = $secret }
+```
+
+成功后再 `deploy.py`，避免用空 R2 覆盖现有账户。
+
+## 本机脚本（仅管理员自用）
+
+`package_users_db.ps1` 仅用于本机调试或紧急手工备份，**不是**给其他注册用户用的流程。
 
 ## 安全说明
 
-- zip 内为 **bcrypt 密码哈希**，不是明文密码。
-- 仍包含 **账户名** 与 **对话 JSON**；因此必须私密存放。
+- zip 内为 bcrypt 密码哈希 + 账户名 + 对话 JSON；R2 桶勿公开列举，下载链接勿发到公开场合。
+- `R2_SECRET_ACCESS_KEY` 与 `USERS_DB_SYNC_SECRET` 只放在 `.env` / 部署环境。

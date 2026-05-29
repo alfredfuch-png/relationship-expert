@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -30,6 +30,7 @@ from app.indexing import read_index_meta, rebuild_index_async
 from app.retrieve import retrieve_context
 from app.settings import _project_root, get_settings
 from app.startup import prepare_runtime_data
+from app.users_db_sync import r2_sync_configured, schedule_users_db_sync, sync_users_db_to_r2
 from app.users_store import (
     RegistrationInviteLimitError,
     consume_registration_slot,
@@ -65,6 +66,7 @@ def _cors_origins() -> list[str]:
 async def lifespan(_app: FastAPI):
     prepare_runtime_data()
     yield
+    sync_users_db_to_r2(get_settings(), force=True)
 
 
 app = FastAPI(title="Romance Expert RAG", version="0.1.0", lifespan=lifespan)
@@ -145,7 +147,11 @@ def auth_logout(response: Response) -> dict:
 
 
 @app.post("/api/auth/register")
-def auth_register(body: RegisterBody, response: Response) -> dict:
+def auth_register(
+    body: RegisterBody,
+    response: Response,
+    background_tasks: BackgroundTasks,
+) -> dict:
     s = get_settings()
     if not registration_enabled(s):
         raise HTTPException(status_code=403, detail="注册未开放。")
@@ -176,6 +182,8 @@ def auth_register(body: RegisterBody, response: Response) -> dict:
         release_registration_slot(s)
         raise
     set_session_cookie(response, user, s)
+    if r2_sync_configured(s):
+        background_tasks.add_task(schedule_users_db_sync, s, True)
     return {
         "ok": True,
         "auth_required": True,
@@ -212,7 +220,11 @@ def get_chat_state(user_id: CurrentUserId) -> dict:
 
 
 @app.put("/api/chat/state")
-def put_chat_state(body: ChatStateBody, user_id: CurrentUserId) -> dict:
+def put_chat_state(
+    body: ChatStateBody,
+    user_id: CurrentUserId,
+    background_tasks: BackgroundTasks,
+) -> dict:
     if not server_chat_enabled():
         raise HTTPException(status_code=404, detail="Server chat storage is not enabled.")
     if user_id in ("anonymous", "shared"):
@@ -221,6 +233,25 @@ def put_chat_state(body: ChatStateBody, user_id: CurrentUserId) -> dict:
         user_id,
         {"threads": body.threads, "active_id": body.active_id},
     )
+    s = get_settings()
+    if r2_sync_configured(s):
+        background_tasks.add_task(schedule_users_db_sync, s, False)
+    return {"ok": True}
+
+
+@app.post("/api/admin/sync-users-db")
+def admin_sync_users_db(request: Request) -> dict:
+    """One-shot backup of users.db to R2 (header X-Sync-Secret)."""
+    s = get_settings()
+    secret = s.users_db_sync_secret.strip()
+    if not secret:
+        raise HTTPException(status_code=404, detail="Not found")
+    if request.headers.get("X-Sync-Secret", "") != secret:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if not r2_sync_configured(s):
+        raise HTTPException(status_code=503, detail="R2 sync is not configured")
+    if not sync_users_db_to_r2(s, force=True):
+        raise HTTPException(status_code=500, detail="Sync failed")
     return {"ok": True}
 
 

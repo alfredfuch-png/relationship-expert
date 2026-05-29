@@ -102,17 +102,13 @@ cd backend
 USERS_BOOTSTRAP=张三:pass1,李四:pass2
 ```
 
-**上线时保留账户（推荐，不泄露用户名/对话）：**
+**上线时保留账户（推荐）：**
 
-1. **公开知识库** — `.\scripts\package_index.ps1` 只打包 `chunks.jsonl` 等（**不含** `users.db`），上传到公开 GitHub Release，对应 `INDEX_BUNDLE_URL`。
-2. **私密账户库** — `.\scripts\package_users_db.ps1` 生成 `relationship-expert-users.zip`，上传到你控制的**私密**存储（对象存储、带签名的直链等），在 `.env` 设置：
-   ```env
-   USERS_DB_URL=https://你的私密地址/relationship-expert-users.zip
-   # USERS_DB_BEARER_TOKEN=   # 若下载需要 Bearer 再填
-   ```
-3. 有人新注册后，从本机 `data/users.db` 重新打包并覆盖私密 zip，再 `deploy.py`（或仅更新私密文件 URL 内容）。
+1. **公开知识库** — `.\scripts\package_index.ps1` 只打包索引文件（不含 `users.db`），上传公开 GitHub Release → `INDEX_BUNDLE_URL`。
+2. **私密账户库** — 配置 Cloudflare R2：`USERS_DB_URL`（下载）+ `R2_*`（自动上传）。用户注册后**服务器自动备份**，无需你知道其密码。详见 [docs/USERS_DB_PRIVATE.md](docs/USERS_DB_PRIVATE.md)。
+3. 部署：`cd backend` → `python ..\scripts\deploy.py`（从 `.env` 注入上述变量）。
 
-不要把 `users.db` 打进公开 Release。部署脚本会从 `.env` 注入 `USERS_DB_URL` 等（勿提交到 GitHub）。
+不要把 `users.db` 打进公开 Release。
 
 ## Deploy（AI Builders Space）
 
