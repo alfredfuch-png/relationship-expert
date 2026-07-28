@@ -383,14 +383,88 @@
   margin-top: 0.15rem;
 }
 
+.phase-tag {
+  display: inline-block;
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-bottom: 0.4rem;
+}
+
+.phase-tag.advise {
+  color: var(--accent);
+}
+
+.shot-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+
+.shot-thumb {
+  width: 72px;
+  height: 72px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+
 .composer {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
   padding: 1rem 1.25rem 1.25rem;
   border-top: 1px solid var(--border);
   background: var(--bg);
+}
+
+.composer-shots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.shot-chip {
+  position: relative;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--panel);
+  cursor: pointer;
+  width: 64px;
+  height: 64px;
+}
+
+.shot-chip img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.shot-chip span {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  color: #fff;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
+  font-size: 0.9rem;
+  line-height: 1;
+}
+
+.composer-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.6rem;
   align-items: end;
+}
+
+.attach-btn {
+  height: 44px;
+  min-width: 64px;
+  padding: 0 0.75rem;
 }
 
 .input {

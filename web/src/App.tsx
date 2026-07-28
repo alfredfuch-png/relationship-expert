@@ -11,12 +11,20 @@ type Source = {
   source: string
 }
 
+type ChatImagePayload = {
+  mime: string
+  data_base64: string
+}
+
 type ChatMessage = {
   role: Role
   content: string
   sources?: Source[]
   routing?: RoutingInfo
   error?: string
+  phase?: 'clarify' | 'advise'
+  imagePreviews?: string[]
+  imageCount?: number
 }
 
 type RoutingInfo = {
@@ -27,6 +35,9 @@ type RoutingInfo = {
   scoped?: boolean
   scoped_chunk_count?: number
   fallback_reason?: string | null
+  phase?: string
+  rag_used?: boolean
+  skipped_retrieval?: boolean
 }
 
 type ChatThread = {
@@ -34,6 +45,7 @@ type ChatThread = {
   title: string
   messages: ChatMessage[]
   updatedAt: number
+  contextSummary?: string
 }
 
 /** Separate from Digital Twin so both apps can save threads side-by-side. */
@@ -74,6 +86,18 @@ function capThreads(list: ChatThread[]): ChatThread[] {
   return [...list].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, MAX_STORED_THREADS)
 }
 
+/** Drop base64 previews before local/cloud persistence (keep imageCount). */
+function sanitizeThreadsForStorage(threads: ChatThread[]): ChatThread[] {
+  return threads.map((t) => ({
+    ...t,
+    messages: t.messages.map((m) => {
+      const count = m.imageCount ?? m.imagePreviews?.length
+      const { imagePreviews: _drop, ...rest } = m
+      return count ? { ...rest, imageCount: count } : rest
+    }),
+  }))
+}
+
 function useIndexStatus() {
   const [status, setStatus] = useState<Record<string, unknown> | null>(null)
   const [loading, setLoading] = useState(false)
@@ -97,7 +121,12 @@ function useIndexStatus() {
   return { status, loading, refresh }
 }
 
-type StreamMeta = { sources?: Source[]; routing?: RoutingInfo }
+type StreamMeta = {
+  sources?: Source[]
+  routing?: RoutingInfo
+  phase?: 'clarify' | 'advise'
+  context_summary?: string
+}
 
 type AppConfig = {
   public_deploy: boolean
@@ -118,6 +147,29 @@ const DEFAULT_CONFIG: AppConfig = {
   server_chat: false,
 }
 
+const MAX_IMAGES = 3
+const MAX_IMAGE_EDGE = 1280
+
+async function compressImageFile(file: File): Promise<ChatImagePayload> {
+  const bitmap = await createImageBitmap(file)
+  const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(bitmap.width, bitmap.height))
+  const w = Math.max(1, Math.round(bitmap.width * scale))
+  const h = Math.max(1, Math.round(bitmap.height * scale))
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('无法处理图片')
+  ctx.drawImage(bitmap, 0, 0, w, h)
+  bitmap.close()
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.72)
+  const comma = dataUrl.indexOf(',')
+  return {
+    mime: 'image/jpeg',
+    data_base64: comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl,
+  }
+}
+
 function useAppConfig() {
   const [config, setConfig] = useState<AppConfig>(DEFAULT_CONFIG)
   useEffect(() => {
@@ -130,7 +182,12 @@ function useAppConfig() {
 }
 
 async function streamChat(
-  message: string,
+  payload: {
+    message: string
+    history: { role: Role; content: string }[]
+    context_summary: string
+    images: ChatImagePayload[]
+  },
   onMeta: (m: StreamMeta) => void,
   onToken: (t: string) => void,
   onError: (e: string) => void,
@@ -139,7 +196,7 @@ async function streamChat(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     credentials: 'include',
-    body: JSON.stringify({ message }),
+    body: JSON.stringify(payload),
   })
   if (res.status === 401) {
     onError('请先登录后再提问。')
@@ -157,10 +214,6 @@ async function streamChat(
         detail ||
           '服务暂时不可用（503）。常见于部署重启或网关超时，请稍等 1–2 分钟后刷新重试。',
       )
-      return
-    }
-    if (res.status === 401) {
-      onError('登录已过期，请刷新页面重新登录。')
       return
     }
     onError(detail ? `请求失败（${res.status}）：${detail}` : `请求失败（${res.status}）`)
@@ -189,11 +242,27 @@ async function streamChat(
         onMeta({
           sources: obj.sources as Source[],
           routing: obj.routing as RoutingInfo | undefined,
+          phase: (obj.routing as RoutingInfo | undefined)?.phase as
+            | 'clarify'
+            | 'advise'
+            | undefined,
         })
         continue
       }
       if (obj.meta && typeof obj.meta === 'object') {
-        onMeta({})
+        const meta = obj.meta as Record<string, unknown>
+        onMeta({
+          phase: meta.phase === 'clarify' || meta.phase === 'advise' ? meta.phase : undefined,
+          context_summary:
+            typeof meta.context_summary === 'string' ? meta.context_summary : undefined,
+          routing:
+            typeof meta.rag_used === 'boolean' || typeof meta.phase === 'string'
+              ? {
+                  rag_used: Boolean(meta.rag_used),
+                  phase: typeof meta.phase === 'string' ? meta.phase : undefined,
+                }
+              : undefined,
+        })
         continue
       }
       if (typeof obj.error === 'string') {
@@ -229,9 +298,14 @@ export default function App() {
   })
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
+  const [pendingImages, setPendingImages] = useState<ChatImagePayload[]>([])
+  const [pendingPreviews, setPendingPreviews] = useState<string[]>([])
+  const fileInputRef = useRef<HTMLInputElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   const serverChat = Boolean(appConfig.server_chat)
+  const activeThread = threads.find((t) => t.id === activeId)
+  const contextSummary = activeThread?.contextSummary ?? ''
 
   useEffect(() => {
     if (!serverChat) {
@@ -284,21 +358,21 @@ export default function App() {
 
   useEffect(() => {
     if (!threadsLoaded) return
+    const safeThreads = sanitizeThreadsForStorage(threads)
     if (serverChat) {
       const timer = window.setTimeout(() => {
         void fetch('/api/chat/state', {
           method: 'PUT',
           credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ threads, active_id: activeId }),
+          body: JSON.stringify({ threads: safeThreads, active_id: activeId }),
         })
       }, 700)
       return () => window.clearTimeout(timer)
     }
-    localStorage.setItem(LS_KEY, JSON.stringify({ threads, activeId }))
+    localStorage.setItem(LS_KEY, JSON.stringify({ threads: safeThreads, activeId }))
   }, [threads, activeId, serverChat, threadsLoaded])
 
-  const activeThread = threads.find((t) => t.id === activeId)
   const messages = activeThread?.messages ?? []
 
   const recentsSorted = useMemo(
@@ -353,12 +427,16 @@ export default function App() {
     setThreads((ts) => capThreads([thread, ...ts]))
     setActiveId(id)
     setInput('')
+    setPendingImages([])
+    setPendingPreviews([])
   }
 
   function handleSelectThread(id: string) {
     if (sending || id === activeId) return
     setActiveId(id)
     setInput('')
+    setPendingImages([])
+    setPendingPreviews([])
   }
 
   function handleDeleteThread(idToDelete: string, e: MouseEvent) {
@@ -398,21 +476,55 @@ export default function App() {
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
     const q = input.trim()
-    if (!q || sending) return
+    if ((!q && pendingImages.length === 0) || sending) return
+    const imagesToSend = [...pendingImages]
+    const previews = [...pendingPreviews]
     setInput('')
-    updateActiveMessages((m) => [...m, { role: 'user', content: q }])
+    setPendingImages([])
+    setPendingPreviews([])
+
+    const history = (activeThread?.messages ?? [])
+      .filter((m) => !m.error && m.content.trim())
+      .slice(-10)
+      .map((m) => ({ role: m.role, content: m.content }))
+
+    const displayContent =
+      q || (imagesToSend.length ? `（上传了 ${imagesToSend.length} 张截图）` : '')
+    const persistContent =
+      imagesToSend.length > 0
+        ? `${displayContent}\n[已上传${imagesToSend.length}张截图]`
+        : displayContent
+
+    updateActiveMessages((m) => [
+      ...m,
+      {
+        role: 'user',
+        content: persistContent,
+        imagePreviews: previews,
+        imageCount: imagesToSend.length || undefined,
+      },
+    ])
     setSending(true)
 
     let acc = ''
     let sources: Source[] | undefined
     let routing: RoutingInfo | undefined
+    let phase: 'clarify' | 'advise' | undefined
     let hadError = false
+    let nextSummary = contextSummary
 
     await streamChat(
-      q,
-      ({ sources: src, routing: rv }) => {
-        sources = src
-        routing = rv
+      {
+        message: q,
+        history,
+        context_summary: contextSummary,
+        images: imagesToSend,
+      },
+      (meta) => {
+        if (meta.sources) sources = meta.sources
+        if (meta.routing) routing = { ...routing, ...meta.routing }
+        if (meta.phase) phase = meta.phase
+        if (meta.context_summary) nextSummary = meta.context_summary
       },
       (t) => {
         acc += t
@@ -420,9 +532,9 @@ export default function App() {
           const copy = [...m]
           const last = copy[copy.length - 1]
           if (last?.role === 'assistant' && !last.error) {
-            copy[copy.length - 1] = { ...last, content: acc, sources, routing }
+            copy[copy.length - 1] = { ...last, content: acc, sources, routing, phase }
           } else {
-            copy.push({ role: 'assistant', content: acc, sources, routing })
+            copy.push({ role: 'assistant', content: acc, sources, routing, phase })
           }
           return copy
         })
@@ -431,18 +543,44 @@ export default function App() {
         hadError = true
         updateActiveMessages((m) => [
           ...m,
-          { role: 'assistant', content: '', error: err, sources, routing },
+          { role: 'assistant', content: '', error: err, sources, routing, phase },
         ])
       },
     )
+
+    if (nextSummary && nextSummary !== contextSummary) {
+      setThreads((ts) =>
+        ts.map((t) => (t.id === activeId ? { ...t, contextSummary: nextSummary } : t)),
+      )
+    }
 
     setSending(false)
 
     if (!hadError && acc.trim() === '') {
       updateActiveMessages((m) => [
         ...m,
-        { role: 'assistant', content: '', error: '模型返回为空。', sources, routing },
+        { role: 'assistant', content: '', error: '模型返回为空。', sources, routing, phase },
       ])
+    }
+  }
+
+  async function onPickImages(files: FileList | null) {
+    if (!files || files.length === 0) return
+    const room = MAX_IMAGES - pendingImages.length
+    if (room <= 0) {
+      alert(`最多上传 ${MAX_IMAGES} 张截图`)
+      return
+    }
+    const picked = Array.from(files).slice(0, room)
+    try {
+      const compressed = await Promise.all(picked.map((f) => compressImageFile(f)))
+      const urls = compressed.map(
+        (c) => `data:${c.mime};base64,${c.data_base64}`,
+      )
+      setPendingImages((prev) => [...prev, ...compressed].slice(0, MAX_IMAGES))
+      setPendingPreviews((prev) => [...prev, ...urls].slice(0, MAX_IMAGES))
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '图片处理失败')
     }
   }
 
@@ -538,7 +676,7 @@ export default function App() {
               {serverChat ? ' · 对话已云端保存' : ''}
             </span>
           ) : (
-            <span>对话模型：deepseek · 可先按标签收窄再检索上下文</span>
+            <span>聊天：Kimi · 知识库检索仅在建议阶段</span>
           )}
           {appConfig.auth_required ? (
             <button
@@ -574,12 +712,10 @@ export default function App() {
         <div className="thread" ref={scrollRef}>
           {messages.length === 0 ? (
             <div className="empty">
-              <h2>问你的亲密关系笔记</h2>
+              <h2>亲密关系咨询</h2>
               <p className="muted">
                 {ready
-                  ? appConfig.public_deploy
-                    ? '直接提问即可，我会根据知识库给出建议。'
-                    : '回答基于「关于亲密关系」目录下检索到的片段，并附带引用编号。'
+                  ? '可以直接提问。信息不够时我会先追问；也可上传聊天截图。'
                   : appConfig.allow_index
                     ? '请先构建索引，然后开始对话。'
                     : '知识库尚未就绪，请稍后再试。'}
@@ -590,6 +726,20 @@ export default function App() {
               <div key={`${activeId}-${i}-${msg.role}`} className={`bubble-row ${msg.role}`}>
                 <div className="avatar">{msg.role === 'user' ? '我' : '专家'}</div>
                 <div className={`bubble ${msg.role}`}>
+                  {msg.phase === 'clarify' ? (
+                    <div className="phase-tag">追问中</div>
+                  ) : msg.phase === 'advise' ? (
+                    <div className="phase-tag advise">建议</div>
+                  ) : null}
+                  {msg.imagePreviews && msg.imagePreviews.length > 0 ? (
+                    <div className="shot-row">
+                      {msg.imagePreviews.map((src) => (
+                        <img key={src.slice(0, 48)} src={src} alt="截图" className="shot-thumb" />
+                      ))}
+                    </div>
+                  ) : msg.imageCount ? (
+                    <p className="muted small">含 {msg.imageCount} 张截图</p>
+                  ) : null}
                   {msg.error ? (
                     <p className="err">{msg.error}</p>
                   ) : (
@@ -644,29 +794,77 @@ export default function App() {
         </div>
 
         <form className="composer" onSubmit={(e) => void handleSubmit(e)}>
-          <textarea
-            className="input"
-            rows={2}
-            placeholder={
-              ready ? '输入问题（恋爱、婚姻、沟通、边界……）' : '请先构建索引再发送'
-            }
-            value={input}
-            disabled={!ready || sending || !threadsLoaded}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault()
-                void handleSubmit(e)
+          {pendingPreviews.length > 0 ? (
+            <div className="composer-shots">
+              {pendingPreviews.map((src, idx) => (
+                <button
+                  key={src.slice(0, 40) + idx}
+                  type="button"
+                  className="shot-chip"
+                  title="移除"
+                  onClick={() => {
+                    setPendingImages((p) => p.filter((_, i) => i !== idx))
+                    setPendingPreviews((p) => p.filter((_, i) => i !== idx))
+                  }}
+                >
+                  <img src={src} alt="" />
+                  <span>×</span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+          <div className="composer-row">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/jpeg,image/png,image/webp,image/gif"
+              multiple
+              hidden
+              onChange={(e) => {
+                void onPickImages(e.target.files)
+                e.target.value = ''
+              }}
+            />
+            <button
+              type="button"
+              className="btn secondary attach-btn"
+              disabled={!ready || sending || !threadsLoaded || pendingImages.length >= MAX_IMAGES}
+              onClick={() => fileInputRef.current?.click()}
+              title="上传聊天截图"
+            >
+              截图
+            </button>
+            <textarea
+              className="input"
+              rows={2}
+              placeholder={
+                ready
+                  ? '描述你的情况…（可先上传截图）信息不够我会追问'
+                  : '请先构建索引再发送'
               }
-            }}
-          />
-          <button
-            type="submit"
-            className="btn send"
-            disabled={!ready || sending || !input.trim() || !threadsLoaded}
-          >
-            发送
-          </button>
+              value={input}
+              disabled={!ready || sending || !threadsLoaded}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault()
+                  void handleSubmit(e)
+                }
+              }}
+            />
+            <button
+              type="submit"
+              className="btn send"
+              disabled={
+                !ready ||
+                sending ||
+                !threadsLoaded ||
+                (!input.trim() && pendingImages.length === 0)
+              }
+            >
+              发送
+            </button>
+          </div>
         </form>
       </main>
     </div>

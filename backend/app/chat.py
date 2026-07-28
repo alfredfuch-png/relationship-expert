@@ -89,23 +89,71 @@ def build_user_message(question: str, chunks: list[RetrievedChunk]) -> str:
     )
 
 
-def build_chat_messages(
-    question: str,
+def build_consult_chat_messages(
+    *,
+    phase: str,
+    user_text: str,
+    history: list[dict[str, str]],
+    context_summary: str,
     chunks: list[RetrievedChunk],
+    images: list[dict[str, str]],
+    questions_guide: str,
     settings: Settings | None = None,
-) -> tuple[list[dict[str, str]], bool]:
-    """Build OpenAI-style messages; returns (messages, rag_used)."""
+) -> tuple[list[dict[str, Any]], bool]:
+    """Build messages for clarify/advise consult flow. Returns (messages, rag_used)."""
+    from app.consult import (
+        Phase,
+        build_consult_system_prompt,
+        build_history_messages,
+        build_multimodal_user_content,
+    )
+
     settings = settings or get_settings()
-    relevant = filter_relevant_chunks(chunks, settings)
-    use_notes = len(relevant) > 0
+    phase_t: Phase = "advise" if phase == "advise" else "clarify"
+    relevant = filter_relevant_chunks(chunks, settings) if phase_t == "advise" else []
+    use_notes = phase_t == "advise" and len(relevant) > 0
+
+    system = build_consult_system_prompt(
+        phase=phase_t,
+        use_notes=use_notes,
+        public_deploy=settings.public_deploy,
+        questions_guide=questions_guide,
+    )
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
+
+    summary = (context_summary or "").strip()
+    if summary:
+        messages.append(
+            {
+                "role": "system",
+                "content": f"【已压缩的咨询上下文】\n{summary}",
+            }
+        )
+
+    for h in build_history_messages(history, limit=10):
+        messages.append({"role": h["role"], "content": h["content"]})
+
     if use_notes:
-        user_content = build_user_message(question, relevant)
+        notes = build_user_message(user_text or "（见截图/上文）", relevant)
+        # When images present, send multimodal: notes text + images
+        if images:
+            content: Any = [
+                {"type": "text", "text": notes},
+            ]
+            multi = build_multimodal_user_content("", images)
+            if isinstance(multi, list):
+                content.extend(p for p in multi if p.get("type") == "image_url")
+            messages.append({"role": "user", "content": content})
+        else:
+            messages.append({"role": "user", "content": notes})
     else:
-        user_content = question.strip()
-    messages = [
-        {"role": "system", "content": build_system_prompt(settings, use_notes=use_notes)},
-        {"role": "user", "content": user_content},
-    ]
+        messages.append(
+            {
+                "role": "user",
+                "content": build_multimodal_user_content(user_text, images),
+            }
+        )
+
     return messages, use_notes
 
 

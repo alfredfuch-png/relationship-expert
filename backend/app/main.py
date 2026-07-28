@@ -5,13 +5,13 @@ import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated
+from typing import Any, Literal
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.auth import (
     auth_enabled,
@@ -26,12 +26,13 @@ from app.auth import (
     verify_registration_invite,
 )
 from app.chat import (
-    build_chat_messages,
+    build_consult_chat_messages,
     effective_chat_model,
     filter_relevant_chunks,
     stream_chat_completion,
     uses_kimi_chat,
 )
+from app.consult import decide_phase, load_questions_guide, refresh_context_summary
 from app.indexing import read_index_meta, rebuild_index_async
 from app.retrieve import retrieve_context
 from app.settings import _project_root, get_settings
@@ -89,8 +90,31 @@ app.add_middleware(
 )
 
 
+class HistoryMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(default="", max_length=12000)
+
+
+class ChatImage(BaseModel):
+    mime: str = Field(default="image/jpeg", max_length=64)
+    data_base64: str = Field(min_length=32, max_length=5_500_000)
+
+
 class ChatBody(BaseModel):
-    message: str = Field(min_length=1, max_length=8000)
+    message: str = Field(default="", max_length=8000)
+    history: list[HistoryMessage] = Field(default_factory=list, max_length=40)
+    context_summary: str = Field(default="", max_length=8000)
+    images: list[ChatImage] = Field(default_factory=list, max_length=3)
+
+    @model_validator(mode="after")
+    def require_text_or_images(self) -> ChatBody:
+        if not self.message.strip() and not self.images:
+            raise ValueError("message or images required")
+        for img in self.images:
+            mime = img.mime.lower().strip()
+            if mime not in ("image/jpeg", "image/png", "image/webp", "image/gif"):
+                raise ValueError(f"unsupported image mime: {img.mime}")
+        return self
 
 
 class LoginBody(BaseModel):
@@ -312,35 +336,82 @@ async def run_index(user_id: CurrentUserId) -> dict:  # noqa: ARG001
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-async def _ndjson_chat_events(message: str) -> AsyncIterator[bytes]:
+async def _ndjson_chat_events(body: ChatBody) -> AsyncIterator[bytes]:
     s = get_settings()
-    # Send an immediate line so reverse proxies (Koyeb / platform) see bytes quickly.
     yield (json.dumps({"meta": {"status": "started"}}, ensure_ascii=False) + "\n").encode()
 
-    data_dir = s.data_dir.resolve()
-    meta = read_index_meta(data_dir)
+    user_text = body.message.strip()
+    history = [{"role": m.role, "content": m.content} for m in body.history]
+    images = [{"mime": i.mime, "data_base64": i.data_base64} for i in body.images]
+    context_summary = body.context_summary.strip()
+    questions_guide = load_questions_guide()
 
     try:
-        chunks, routing_info = await retrieve_context(
-            message,
+        phase = await decide_phase(
             settings=s,
-            meta=meta,
+            user_message=user_text or "（用户上传了聊天截图）",
+            history=history,
+            context_summary=context_summary,
+            has_images=bool(images),
+            questions_guide=questions_guide,
         )
-    except RuntimeError as e:
-        yield (json.dumps({"error": str(e)}, ensure_ascii=False) + "\n").encode()
-        return
-    except Exception as e:  # noqa: BLE001
-        yield (json.dumps({"error": f"检索失败：{e!s}"}, ensure_ascii=False) + "\n").encode()
-        return
+    except Exception:  # noqa: BLE001
+        phase = "clarify" if len(history) < 2 else "advise"
 
-    relevant_chunks = filter_relevant_chunks(chunks, s)
-    messages, rag_used = build_chat_messages(message, chunks, s)
+    yield (
+        json.dumps({"meta": {"phase": phase, "status": "phase_decided"}}, ensure_ascii=False)
+        + "\n"
+    ).encode()
+
+    chunks = []
+    routing_info: dict = {"rag_used": False, "phase": phase}
+    if phase == "advise":
+        data_dir = s.data_dir.resolve()
+        meta = read_index_meta(data_dir)
+        retrieve_q = user_text or context_summary or "亲密关系建议"
+        try:
+            chunks, routing_info = await retrieve_context(
+                retrieve_q,
+                settings=s,
+                meta=meta,
+            )
+        except RuntimeError as e:
+            yield (json.dumps({"error": str(e)}, ensure_ascii=False) + "\n").encode()
+            return
+        except Exception as e:  # noqa: BLE001
+            yield (json.dumps({"error": f"检索失败：{e!s}"}, ensure_ascii=False) + "\n").encode()
+            return
+    else:
+        routing_info = {
+            "phase": "clarify",
+            "rag_used": False,
+            "skipped_retrieval": True,
+        }
+
+    messages, rag_used = build_consult_chat_messages(
+        phase=phase,
+        user_text=user_text,
+        history=history,
+        context_summary=context_summary,
+        chunks=chunks,
+        images=images,
+        questions_guide=questions_guide,
+        settings=s,
+    )
     routing_info["rag_used"] = rag_used
+    routing_info["phase"] = phase
+    relevant_chunks = filter_relevant_chunks(chunks, s) if rag_used else []
 
     if s.public_deploy:
         yield (
             json.dumps(
-                {"meta": {"public_deploy": True, "rag_used": rag_used}},
+                {
+                    "meta": {
+                        "public_deploy": True,
+                        "rag_used": rag_used,
+                        "phase": phase,
+                    }
+                },
                 ensure_ascii=False,
             )
             + "\n"
@@ -359,14 +430,47 @@ async def _ndjson_chat_events(message: str) -> AsyncIterator[bytes]:
         payload = {"sources": ctx_lines, "routing": routing_info}
         yield (json.dumps(payload, ensure_ascii=False) + "\n").encode()
 
+    assistant_acc = []
     async for line in stream_chat_completion(s, messages):
+        try:
+            obj = json.loads(line)
+            if isinstance(obj.get("text"), str):
+                assistant_acc.append(obj["text"])
+        except json.JSONDecodeError:
+            pass
         yield line.encode()
+
+    assistant_text = "".join(assistant_acc).strip()
+    should_summarize = bool(assistant_text) and (
+        len(history) + 1 >= 4 or len((context_summary or "")) > 0 or phase == "advise"
+    )
+    new_summary = context_summary
+    if should_summarize:
+        try:
+            new_summary = await refresh_context_summary(
+                settings=s,
+                previous_summary=context_summary,
+                history=history,
+                latest_user=user_text or "（截图）",
+                latest_assistant=assistant_text,
+            )
+        except Exception:  # noqa: BLE001
+            new_summary = context_summary
+
+    if new_summary and new_summary != context_summary:
+        yield (
+            json.dumps(
+                {"meta": {"context_summary": new_summary, "phase": phase}},
+                ensure_ascii=False,
+            )
+            + "\n"
+        ).encode()
 
 
 @app.post("/api/chat")
 async def chat(body: ChatBody, user_id: CurrentUserId) -> StreamingResponse:  # noqa: ARG001
     return StreamingResponse(
-        _ndjson_chat_events(body.message),
+        _ndjson_chat_events(body),
         media_type="application/x-ndjson",
     )
 
