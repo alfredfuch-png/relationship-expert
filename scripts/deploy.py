@@ -61,6 +61,10 @@ def _merge_env_vars(cfg: dict) -> dict[str, str]:
         "REGISTRATION_INVITE_MAX_USES",
         "HTTPS_PROXY",
         "HTTP_PROXY",
+        "KIMI_API_KEY",
+        "KIMI_API_BASE_URL",
+        "KIMI_CHAT_MODEL",
+        "KIMI_VISION_MODEL",
     ):
         val = _read_dotenv().get(key, "").strip()
         if val and key not in env:

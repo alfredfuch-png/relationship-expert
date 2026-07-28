@@ -57,8 +57,16 @@ class Settings(BaseSettings):
 
     ai_builder_token: str = ""
     ai_api_base_url: str = "https://space.ai-builders.com/backend/v1"
+    # Legacy AI Builders chat model (used only when KIMI_API_KEY is empty).
     ai_chat_model: str = "deepseek"
     ai_embedding_model: str = "text-embedding-3-small"
+
+    # Kimi / Moonshot — preferred chat provider when KIMI_API_KEY is set.
+    kimi_api_key: str = ""
+    kimi_api_base_url: str = "https://api.moonshot.cn/v1"
+    kimi_chat_model: str = "kimi-k3"
+    # Same model for vision when screenshots are attached (kimi-k3 is multimodal).
+    kimi_vision_model: str = ""
 
     # Optional: when direct access to space.ai-builders.com fails (e.g. regional network).
     http_proxy: str = ""

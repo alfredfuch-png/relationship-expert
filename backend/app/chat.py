@@ -109,26 +109,54 @@ def build_chat_messages(
     return messages, use_notes
 
 
+def effective_chat_model(settings: Settings | None = None) -> str:
+    settings = settings or get_settings()
+    if settings.kimi_api_key.strip():
+        return (settings.kimi_chat_model or "kimi-k3").strip()
+    return settings.ai_chat_model.strip() or "deepseek"
+
+
+def uses_kimi_chat(settings: Settings | None = None) -> bool:
+    settings = settings or get_settings()
+    return bool(settings.kimi_api_key.strip())
+
+
 async def stream_chat_completion(
     settings: Settings,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
 ) -> AsyncIterator[str]:
-    if not settings.ai_builder_token:
-        yield json.dumps({"error": "AI_BUILDER_TOKEN is not set in .env"}) + "\n"
-        return
+    if uses_kimi_chat(settings):
+        token = settings.kimi_api_key.strip()
+        base = settings.kimi_api_base_url.rstrip("/") or "https://api.moonshot.cn/v1"
+        model = effective_chat_model(settings)
+        host_hint = "Kimi（api.moonshot.cn）"
+    else:
+        if not settings.ai_builder_token:
+            yield json.dumps(
+                {"error": "未配置聊天模型：请在 .env 设置 KIMI_API_KEY，或设置 AI_BUILDER_TOKEN。"}
+            ) + "\n"
+            return
+        token = settings.ai_builder_token
+        base = settings.ai_api_base_url.rstrip("/")
+        model = settings.ai_chat_model
+        host_hint = "AI Builders（space.ai-builders.com）"
 
-    base = settings.ai_api_base_url.rstrip("/")
     url = f"{base}/chat/completions"
     headers = {
-        "Authorization": f"Bearer {settings.ai_builder_token}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
     payload: dict[str, Any] = {
-        "model": settings.ai_chat_model,
+        "model": model,
         "messages": messages,
-        "temperature": 0.25,
         "stream": True,
     }
+    # kimi-k3: always thinking; temperature fixed at 1; prefer faster replies for chat UX
+    if uses_kimi_chat(settings):
+        payload["temperature"] = 1.0
+        payload["reasoning_effort"] = "low"
+    else:
+        payload["temperature"] = 0.25
 
     async with async_gateway_client(settings, timeout_seconds=180.0) as client:
         try:
@@ -171,8 +199,18 @@ async def stream_chat_completion(
                         delta = choices[0].get("delta") or {}
                         piece = delta.get("content")
                         if piece:
-                            yield json.dumps({"text": piece}) + "\n"
+                            # Kimi may return content as string or list of parts
+                            if isinstance(piece, list):
+                                piece = "".join(
+                                    p.get("text", "") if isinstance(p, dict) else str(p)
+                                    for p in piece
+                                )
+                            if piece:
+                                yield json.dumps({"text": piece}) + "\n"
         except httpx.ConnectError as e:
-            yield json.dumps({"error": format_gateway_connect_error(e)}, ensure_ascii=False) + "\n"
+            yield json.dumps(
+                {"error": format_gateway_connect_error(e, host_hint=host_hint)},
+                ensure_ascii=False,
+            ) + "\n"
         except httpx.HTTPError as e:
-            yield json.dumps({"error": f"请求 AI 网关失败：{e!s}"}, ensure_ascii=False) + "\n"
+            yield json.dumps({"error": f"请求聊天 API 失败：{e!s}"}, ensure_ascii=False) + "\n"

@@ -19,11 +19,11 @@ def async_gateway_client(settings: Settings, *, timeout_seconds: float) -> httpx
     )
 
 
-def format_gateway_connect_error(exc: BaseException) -> str:
+def format_gateway_connect_error(exc: BaseException, *, host_hint: str = "AI API") -> str:
     detail = str(exc).strip() or repr(exc)
     return (
-        "无法连接 AI 网关（space.ai-builders.com）。"
-        "检索可以成功，但生成回答需要访问该地址；若本机无法直连国外 API，请开启 VPN，"
-        "或在 .env 中设置 HTTPS_PROXY（例如 HTTPS_PROXY=http://127.0.0.1:7890）。"
+        f"无法连接 {host_hint}。"
+        "若本机无法直连，请开启 VPN，或在 .env 中设置 HTTPS_PROXY"
+        "（例如 HTTPS_PROXY=http://127.0.0.1:7890）。"
         f" 技术信息：{detail}"
     )

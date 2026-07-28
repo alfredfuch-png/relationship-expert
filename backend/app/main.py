@@ -25,7 +25,13 @@ from app.auth import (
     set_session_cookie,
     verify_registration_invite,
 )
-from app.chat import build_chat_messages, filter_relevant_chunks, stream_chat_completion
+from app.chat import (
+    build_chat_messages,
+    effective_chat_model,
+    filter_relevant_chunks,
+    stream_chat_completion,
+    uses_kimi_chat,
+)
 from app.indexing import read_index_meta, rebuild_index_async
 from app.retrieve import retrieve_context
 from app.settings import _project_root, get_settings
@@ -268,7 +274,8 @@ def health() -> dict:
     s = get_settings()
     out: dict = {
         "status": "ok",
-        "chat_model": s.ai_chat_model,
+        "chat_model": effective_chat_model(s),
+        "chat_provider": "kimi" if uses_kimi_chat(s) else "ai_builders",
         "embedding_model": s.ai_embedding_model,
         "users_db_url_set": bool(s.users_db_url.strip()),
         "backup_r2_configured": r2_sync_configured(s),
