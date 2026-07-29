@@ -486,6 +486,22 @@
   border-color: var(--accent);
 }
 
+.composer-actions {
+  position: relative;
+  min-width: 88px;
+  height: 44px;
+}
+
+.composer-actions .btn.send {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+}
+
+.composer-actions .btn.send[hidden] {
+  display: none !important;
+}
+
 .btn.send {
   background: var(--accent);
   color: #fff;

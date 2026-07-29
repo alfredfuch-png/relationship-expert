@@ -404,6 +404,7 @@ export default function App() {
   const runIdRef = useRef(0)
   const generatingRef = useRef(false)
   const lastPromptRef = useRef('')
+  const suppressSubmitUntilRef = useRef(0)
   const threadsRef = useRef(threads)
   const activeIdRef = useRef(activeId)
 
@@ -586,13 +587,16 @@ export default function App() {
   }
 
   function stopGeneration() {
-    // Idempotent: second call (click after pointerdown) no-ops.
+    // Idempotent: second call no-ops after cancel.
     if (!generatingRef.current && !abortRef.current) {
       flushSync(() => setSending(false))
       return
     }
     generatingRef.current = false
     runIdRef.current += 1
+    // Prevent the same click/pointer sequence from immediately re-submitting
+    // after the button swaps from「停止」to「发送」.
+    suppressSubmitUntilRef.current = Date.now() + 800
     const controller = abortRef.current
     abortRef.current = null
     try {
@@ -629,8 +633,9 @@ export default function App() {
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
+    if (Date.now() < suppressSubmitUntilRef.current) return
     const q = input.trim()
-    if ((!q && pendingImages.length === 0) || generatingRef.current) return
+    if ((!q && pendingImages.length === 0) || generatingRef.current || sending) return
     const imagesToSend = [...pendingImages]
     const previews = [...pendingPreviews]
     lastPromptRef.current =
@@ -741,13 +746,6 @@ export default function App() {
         { role: 'assistant', content: '', error: '模型返回为空。', sources, routing, phase },
       ])
     }
-  }
-
-  function handleStop(e?: MouseEvent<HTMLButtonElement>) {
-    e?.preventDefault()
-    e?.stopPropagation()
-    if (!generatingRef.current && !sending && !abortRef.current) return
-    stopGeneration()
   }
 
   async function onPickImages(files: FileList | null) {
@@ -1040,34 +1038,47 @@ export default function App() {
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault()
-                  if (!sending) void handleSubmit(e)
+                  if (Date.now() < suppressSubmitUntilRef.current) return
+                  if (!sending && !generatingRef.current) void handleSubmit(e)
                 }
               }}
             />
-            {sending ? (
+            <div className="composer-actions">
+              {/* Both mounted so swapping「停止」/「发送」won't re-fire submit on the same click. */}
               <button
                 type="button"
                 className="btn send stop"
-                onPointerDown={(ev) => {
-                  // Prefer pointerdown so stop wins before any lingering stream paints.
+                hidden={!sending}
+                tabIndex={sending ? 0 : -1}
+                onClick={(ev) => {
                   ev.preventDefault()
+                  ev.stopPropagation()
                   stopGeneration()
                 }}
-                onClick={(ev) => handleStop(ev)}
               >
                 停止
               </button>
-            ) : (
               <button
                 type="submit"
                 className="btn send"
+                hidden={sending}
+                tabIndex={sending ? -1 : 0}
                 disabled={
-                  !ready || !threadsLoaded || (!input.trim() && pendingImages.length === 0)
+                  !ready ||
+                  !threadsLoaded ||
+                  sending ||
+                  (!input.trim() && pendingImages.length === 0)
                 }
+                onClick={(ev) => {
+                  if (Date.now() < suppressSubmitUntilRef.current) {
+                    ev.preventDefault()
+                    ev.stopPropagation()
+                  }
+                }}
               >
                 发送
               </button>
-            )}
+            </div>
           </div>
         </form>
       </main>
