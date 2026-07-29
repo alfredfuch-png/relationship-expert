@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent } from 'react'
+import { flushSync } from 'react-dom'
 import './App.css'
 
 type Role = 'user' | 'assistant'
@@ -346,6 +347,7 @@ async function streamChat(
           return 'error'
         }
         if (typeof obj.text === 'string') {
+          if (signal?.aborted) return 'aborted'
           onToken(obj.text)
         }
       }
@@ -400,8 +402,17 @@ export default function App() {
   const scrollRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef<AbortController | null>(null)
   const runIdRef = useRef(0)
-  const stoppedRef = useRef(false)
+  const generatingRef = useRef(false)
   const lastPromptRef = useRef('')
+  const threadsRef = useRef(threads)
+  const activeIdRef = useRef(activeId)
+
+  useEffect(() => {
+    threadsRef.current = threads
+  }, [threads])
+  useEffect(() => {
+    activeIdRef.current = activeId
+  }, [activeId])
 
   const serverChat = Boolean(appConfig.server_chat)
   const activeThread = threads.find((t) => t.id === activeId)
@@ -521,7 +532,7 @@ export default function App() {
   )
 
   function handleNewChat() {
-    if (sending) abortRef.current?.abort()
+    if (generatingRef.current || sending) stopGeneration()
     const id = newId()
     const thread: ChatThread = { id, title: '新对话', messages: [], updatedAt: Date.now() }
     setThreads((ts) => capThreads([thread, ...ts]))
@@ -533,7 +544,7 @@ export default function App() {
 
   function handleSelectThread(id: string) {
     if (id === activeId) return
-    if (sending) abortRef.current?.abort()
+    if (generatingRef.current || sending) stopGeneration()
     setActiveId(id)
     setInput('')
     setPendingImages([])
@@ -574,49 +585,56 @@ export default function App() {
     }
   }
 
-  function restoreLastUserToComposer(fallbackText: string) {
-    let restoredText = fallbackText
-    setThreads((ts) =>
-      capThreads(
-        ts.map((t) => {
-          if (t.id !== activeId) return t
-          const copy = [...t.messages]
-          const last = copy[copy.length - 1]
-          if (last?.role === 'assistant' && !last.error) {
-            if (last.content.trim()) {
-              copy[copy.length - 1] = {
-                ...last,
-                content: last.content.includes('（已停止生成）')
-                  ? last.content
-                  : `${last.content.trim()}\n\n（已停止生成）`,
-              }
-              return { ...t, messages: copy, updatedAt: Date.now() }
-            }
-            copy.pop()
-          }
-          const userMsg = copy[copy.length - 1]
-          if (userMsg?.role === 'user') {
-            copy.pop()
-            restoredText =
-              userMsg.content
-                .replace(/\n\[已上传\d+张截图\]$/, '')
-                .replace(/^（上传了 \d+ 张截图）$/, '')
-                .trim() || fallbackText
-          }
-          return { ...t, messages: copy, updatedAt: Date.now() }
-        }),
-      ),
-    )
-    if (restoredText) setInput(restoredText)
+  function stopGeneration() {
+    // Idempotent: second call (click after pointerdown) no-ops.
+    if (!generatingRef.current && !abortRef.current) {
+      flushSync(() => setSending(false))
+      return
+    }
+    generatingRef.current = false
+    runIdRef.current += 1
+    const controller = abortRef.current
+    abortRef.current = null
+    try {
+      controller?.abort()
+    } catch {
+      /* ignore */
+    }
+
+    const aid = activeIdRef.current
+    const msgs = [...(threadsRef.current.find((t) => t.id === aid)?.messages ?? [])]
+    let restore = lastPromptRef.current
+    if (msgs.length > 0 && msgs[msgs.length - 1]?.role === 'assistant') {
+      msgs.pop()
+    }
+    if (msgs.length > 0 && msgs[msgs.length - 1]?.role === 'user') {
+      const userMsg = msgs.pop()!
+      restore =
+        userMsg.content
+          .replace(/\n\[已上传\d+张截图\]$/, '')
+          .replace(/^（上传了 \d+ 张截图）$/, '')
+          .trim() || restore
+    }
+
+    flushSync(() => {
+      setSending(false)
+      setInput(restore)
+      setThreads((ts) =>
+        capThreads(
+          ts.map((t) => (t.id === aid ? { ...t, messages: msgs, updatedAt: Date.now() } : t)),
+        ),
+      )
+    })
   }
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
     const q = input.trim()
-    if ((!q && pendingImages.length === 0) || sending) return
+    if ((!q && pendingImages.length === 0) || generatingRef.current) return
     const imagesToSend = [...pendingImages]
     const previews = [...pendingPreviews]
-    lastPromptRef.current = q
+    lastPromptRef.current =
+      q || (imagesToSend.length ? `（上传了 ${imagesToSend.length} 张截图）` : '')
     setInput('')
     setPendingImages([])
     setPendingPreviews([])
@@ -644,7 +662,7 @@ export default function App() {
     ])
 
     const runId = ++runIdRef.current
-    stoppedRef.current = false
+    generatingRef.current = true
     setSending(true)
 
     const controller = new AbortController()
@@ -657,7 +675,7 @@ export default function App() {
     let hadError = false
     let nextSummary = contextSummary
 
-    const stillActive = () => runId === runIdRef.current && !stoppedRef.current
+    const stillActive = () => generatingRef.current && runId === runIdRef.current
 
     const result = await streamChat(
       {
@@ -700,11 +718,14 @@ export default function App() {
 
     if (abortRef.current === controller) abortRef.current = null
 
-    // Stop already unlocked the UI.
+    // If user already stopped, UI was restored — do not touch state again.
     if (!stillActive() || result === 'aborted') {
-      setSending(false)
+      generatingRef.current = false
+      flushSync(() => setSending(false))
       return
     }
+
+    generatingRef.current = false
 
     if (nextSummary && nextSummary !== contextSummary) {
       setThreads((ts) =>
@@ -722,15 +743,11 @@ export default function App() {
     }
   }
 
-  function handleStop() {
-    if (!sending && !abortRef.current) return
-    stoppedRef.current = true
-    runIdRef.current += 1
-    const controller = abortRef.current
-    abortRef.current = null
-    controller?.abort()
-    setSending(false)
-    restoreLastUserToComposer(lastPromptRef.current)
+  function handleStop(e?: MouseEvent<HTMLButtonElement>) {
+    e?.preventDefault()
+    e?.stopPropagation()
+    if (!generatingRef.current && !sending && !abortRef.current) return
+    stopGeneration()
   }
 
   async function onPickImages(files: FileList | null) {
@@ -1028,7 +1045,16 @@ export default function App() {
               }}
             />
             {sending ? (
-              <button type="button" className="btn send stop" onClick={handleStop}>
+              <button
+                type="button"
+                className="btn send stop"
+                onPointerDown={(ev) => {
+                  // Prefer pointerdown so stop wins before any lingering stream paints.
+                  ev.preventDefault()
+                  stopGeneration()
+                }}
+                onClick={(ev) => handleStop(ev)}
+              >
                 停止
               </button>
             ) : (
