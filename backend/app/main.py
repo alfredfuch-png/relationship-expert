@@ -273,7 +273,8 @@ def put_chat_state(
     )
     s = get_settings()
     if r2_sync_configured(s):
-        background_tasks.add_task(schedule_users_db_sync, s, False)
+        # Force backup so redeploys don't lose recent chats (throttled sync can skip).
+        background_tasks.add_task(schedule_users_db_sync, s, True)
     return {"ok": True}
 
 

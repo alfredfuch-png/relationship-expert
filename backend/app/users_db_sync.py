@@ -140,6 +140,6 @@ def restore_users_db_from_r2(settings: Settings | None = None) -> bool:
     return True
 
 
-def schedule_users_db_sync(settings: Settings | None = None, *, force: bool = False) -> None:
+def schedule_users_db_sync(settings: Settings | None = None, force: bool = False) -> None:
     """Fire-and-forget sync (for BackgroundTasks)."""
     sync_users_db_to_r2(settings, force=force)
