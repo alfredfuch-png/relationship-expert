@@ -493,6 +493,14 @@
   height: 44px;
 }
 
+.btn.send.stop {
+  background: #444;
+}
+
+.btn.send.stop:hover:not(:disabled) {
+  background: #333;
+}
+
 .btn.send:hover:not(:disabled) {
   background: var(--accent-dim);
 }

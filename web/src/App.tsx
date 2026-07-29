@@ -200,88 +200,111 @@ async function streamChat(
   onMeta: (m: StreamMeta) => void,
   onToken: (t: string) => void,
   onError: (e: string) => void,
-) {
-  const res = await fetch('/api/chat', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    credentials: 'include',
-    body: JSON.stringify(payload),
-  })
-  if (res.status === 401) {
-    onError('请先登录后再提问。')
-    return
-  }
-  if (!res.ok || !res.body) {
-    let detail = ''
-    try {
-      detail = (await res.text()).trim().slice(0, 200)
-    } catch {
-      detail = ''
+  signal?: AbortSignal,
+): Promise<'ok' | 'aborted' | 'error'> {
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(payload),
+      signal,
+    })
+    if (res.status === 401) {
+      onError('请先登录后再提问。')
+      return 'error'
     }
-    if (res.status === 503) {
-      onError(
-        detail ||
-          '服务暂时不可用（503）。常见于部署重启或网关超时，请稍等 1–2 分钟后刷新重试。',
-      )
-      return
-    }
-    onError(detail ? `请求失败（${res.status}）：${detail}` : `请求失败（${res.status}）`)
-    return
-  }
-  const reader = res.body.getReader()
-  const dec = new TextDecoder()
-  let buf = ''
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    buf += dec.decode(value, { stream: true })
-    for (;;) {
-      const nl = buf.indexOf('\n')
-      if (nl < 0) break
-      const line = buf.slice(0, nl).trim()
-      buf = buf.slice(nl + 1)
-      if (!line) continue
-      let obj: Record<string, unknown>
+    if (!res.ok || !res.body) {
+      let detail = ''
       try {
-        obj = JSON.parse(line) as Record<string, unknown>
+        detail = (await res.text()).trim().slice(0, 200)
       } catch {
-        continue
+        detail = ''
       }
-      if (Array.isArray(obj.sources)) {
-        onMeta({
-          sources: obj.sources as Source[],
-          routing: obj.routing as RoutingInfo | undefined,
-          phase: (obj.routing as RoutingInfo | undefined)?.phase as
-            | 'clarify'
-            | 'advise'
-            | undefined,
-        })
-        continue
+      if (res.status === 503) {
+        onError(
+          detail ||
+            '服务暂时不可用（503）。常见于部署重启或网关超时，请稍等 1–2 分钟后刷新重试。',
+        )
+        return 'error'
       }
-      if (obj.meta && typeof obj.meta === 'object') {
-        const meta = obj.meta as Record<string, unknown>
-        onMeta({
-          phase: meta.phase === 'clarify' || meta.phase === 'advise' ? meta.phase : undefined,
-          context_summary:
-            typeof meta.context_summary === 'string' ? meta.context_summary : undefined,
-          routing:
-            typeof meta.rag_used === 'boolean' || typeof meta.phase === 'string'
-              ? {
-                  rag_used: Boolean(meta.rag_used),
-                  phase: typeof meta.phase === 'string' ? meta.phase : undefined,
-                }
-              : undefined,
-        })
-        continue
+      onError(detail ? `请求失败（${res.status}）：${detail}` : `请求失败（${res.status}）`)
+      return 'error'
+    }
+    const reader = res.body.getReader()
+    const dec = new TextDecoder()
+    let buf = ''
+    while (true) {
+      if (signal?.aborted) {
+        try {
+          await reader.cancel()
+        } catch {
+          /* ignore */
+        }
+        return 'aborted'
       }
-      if (typeof obj.error === 'string') {
-        onError(obj.error)
-        return
-      }
-      if (typeof obj.text === 'string') {
-        onToken(obj.text)
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += dec.decode(value, { stream: true })
+      for (;;) {
+        const nl = buf.indexOf('\n')
+        if (nl < 0) break
+        const line = buf.slice(0, nl).trim()
+        buf = buf.slice(nl + 1)
+        if (!line) continue
+        let obj: Record<string, unknown>
+        try {
+          obj = JSON.parse(line) as Record<string, unknown>
+        } catch {
+          continue
+        }
+        if (Array.isArray(obj.sources)) {
+          onMeta({
+            sources: obj.sources as Source[],
+            routing: obj.routing as RoutingInfo | undefined,
+            phase: (obj.routing as RoutingInfo | undefined)?.phase as
+              | 'clarify'
+              | 'advise'
+              | undefined,
+          })
+          continue
+        }
+        if (obj.meta && typeof obj.meta === 'object') {
+          const meta = obj.meta as Record<string, unknown>
+          onMeta({
+            phase: meta.phase === 'clarify' || meta.phase === 'advise' ? meta.phase : undefined,
+            context_summary:
+              typeof meta.context_summary === 'string' ? meta.context_summary : undefined,
+            routing:
+              typeof meta.rag_used === 'boolean' || typeof meta.phase === 'string'
+                ? {
+                    rag_used: Boolean(meta.rag_used),
+                    phase: typeof meta.phase === 'string' ? meta.phase : undefined,
+                  }
+                : undefined,
+          })
+          continue
+        }
+        if (typeof obj.error === 'string') {
+          onError(obj.error)
+          return 'error'
+        }
+        if (typeof obj.text === 'string') {
+          onToken(obj.text)
+        }
       }
     }
+    return 'ok'
+  } catch (e) {
+    if (
+      signal?.aborted ||
+      (e instanceof DOMException && e.name === 'AbortError') ||
+      (e instanceof Error && e.name === 'AbortError')
+    ) {
+      return 'aborted'
+    }
+    onError(e instanceof Error ? e.message : String(e))
+    return 'error'
   }
 }
 
@@ -311,6 +334,7 @@ export default function App() {
   const [pendingPreviews, setPendingPreviews] = useState<string[]>([])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const abortRef = useRef<AbortController | null>(null)
 
   const serverChat = Boolean(appConfig.server_chat)
   const activeThread = threads.find((t) => t.id === activeId)
@@ -430,7 +454,7 @@ export default function App() {
   )
 
   function handleNewChat() {
-    if (sending) return
+    if (sending) abortRef.current?.abort()
     const id = newId()
     const thread: ChatThread = { id, title: '新对话', messages: [], updatedAt: Date.now() }
     setThreads((ts) => capThreads([thread, ...ts]))
@@ -441,7 +465,8 @@ export default function App() {
   }
 
   function handleSelectThread(id: string) {
-    if (sending || id === activeId) return
+    if (id === activeId) return
+    if (sending) abortRef.current?.abort()
     setActiveId(id)
     setInput('')
     setPendingImages([])
@@ -515,6 +540,9 @@ export default function App() {
     ])
     setSending(true)
 
+    const controller = new AbortController()
+    abortRef.current = controller
+
     let acc = ''
     let sources: Source[] | undefined
     let routing: RoutingInfo | undefined
@@ -522,7 +550,7 @@ export default function App() {
     let hadError = false
     let nextSummary = contextSummary
 
-    await streamChat(
+    const result = await streamChat(
       {
         message: q,
         history,
@@ -555,7 +583,51 @@ export default function App() {
           { role: 'assistant', content: '', error: err, sources, routing, phase },
         ])
       },
+      controller.signal,
     )
+
+    abortRef.current = null
+
+    if (result === 'aborted') {
+      if (acc.trim()) {
+        updateActiveMessages((m) => {
+          const copy = [...m]
+          const last = copy[copy.length - 1]
+          if (last?.role === 'assistant' && !last.error) {
+            copy[copy.length - 1] = {
+              ...last,
+              content: `${acc.trim()}\n\n（已停止生成）`,
+              sources,
+              routing,
+              phase,
+            }
+          }
+          return copy
+        })
+      } else {
+        let restored = q
+        updateActiveMessages((m) => {
+          const copy = [...m]
+          const last = copy[copy.length - 1]
+          if (last?.role === 'assistant' && !last.content.trim() && !last.error) {
+            copy.pop()
+          }
+          const userMsg = copy[copy.length - 1]
+          if (userMsg?.role === 'user') {
+            copy.pop()
+            restored =
+              userMsg.content
+                .replace(/\n\[已上传\d+张截图\]$/, '')
+                .replace(/^（上传了 \d+ 张截图）$/, '')
+                .trim() || q
+          }
+          return copy
+        })
+        setInput(restored)
+      }
+      setSending(false)
+      return
+    }
 
     if (nextSummary && nextSummary !== contextSummary) {
       setThreads((ts) =>
@@ -571,6 +643,10 @@ export default function App() {
         { role: 'assistant', content: '', error: '模型返回为空。', sources, routing, phase },
       ])
     }
+  }
+
+  function handleStop() {
+    abortRef.current?.abort()
   }
 
   async function onPickImages(files: FileList | null) {
@@ -849,9 +925,11 @@ export default function App() {
               className="input"
               rows={2}
               placeholder={
-                ready
-                  ? '描述你的情况…（可先上传截图）信息不够我会追问'
-                  : '请先构建索引再发送'
+                sending
+                  ? '生成中…可点「停止」后修改问题'
+                  : ready
+                    ? '描述你的情况…（可先上传截图）信息不够我会追问'
+                    : '请先构建索引再发送'
               }
               value={input}
               disabled={!ready || sending || !threadsLoaded}
@@ -859,22 +937,25 @@ export default function App() {
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
                   e.preventDefault()
-                  void handleSubmit(e)
+                  if (!sending) void handleSubmit(e)
                 }
               }}
             />
-            <button
-              type="submit"
-              className="btn send"
-              disabled={
-                !ready ||
-                sending ||
-                !threadsLoaded ||
-                (!input.trim() && pendingImages.length === 0)
-              }
-            >
-              发送
-            </button>
+            {sending ? (
+              <button type="button" className="btn send stop" onClick={handleStop}>
+                停止
+              </button>
+            ) : (
+              <button
+                type="submit"
+                className="btn send"
+                disabled={
+                  !ready || !threadsLoaded || (!input.trim() && pendingImages.length === 0)
+                }
+              >
+                发送
+              </button>
+            )}
           </div>
         </form>
       </main>
