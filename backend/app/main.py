@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -337,9 +338,12 @@ async def run_index(user_id: CurrentUserId) -> dict:  # noqa: ARG001
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-async def _ndjson_chat_events(body: ChatBody) -> AsyncIterator[bytes]:
+async def _ndjson_chat_events(body: ChatBody, request: Request) -> AsyncIterator[bytes]:
     s = get_settings()
     yield (json.dumps({"meta": {"status": "started"}}, ensure_ascii=False) + "\n").encode()
+
+    async def _cancelled() -> bool:
+        return await request.is_disconnected()
 
     user_text = body.message.strip()
     history = [{"role": m.role, "content": m.content} for m in body.history]
@@ -347,17 +351,28 @@ async def _ndjson_chat_events(body: ChatBody) -> AsyncIterator[bytes]:
     context_summary = body.context_summary.strip()
     questions_guide = load_questions_guide()
 
+    if await _cancelled():
+        return
+
     try:
-        phase = await decide_phase(
-            settings=s,
-            user_message=user_text or "（用户上传了聊天截图）",
-            history=history,
-            context_summary=context_summary,
-            has_images=bool(images),
-            questions_guide=questions_guide,
+        phase = await _await_unless_disconnected(
+            request,
+            decide_phase(
+                settings=s,
+                user_message=user_text or "（用户上传了聊天截图）",
+                history=history,
+                context_summary=context_summary,
+                has_images=bool(images),
+                questions_guide=questions_guide,
+            ),
         )
+        if phase is None:
+            return
     except Exception:  # noqa: BLE001
         phase = "clarify" if len(history) < 2 else "advise"
+
+    if await _cancelled():
+        return
 
     yield (
         json.dumps({"meta": {"phase": phase, "status": "phase_decided"}}, ensure_ascii=False)
@@ -371,11 +386,17 @@ async def _ndjson_chat_events(body: ChatBody) -> AsyncIterator[bytes]:
         meta = read_index_meta(data_dir)
         retrieve_q = user_text or context_summary or "亲密关系建议"
         try:
-            chunks, routing_info = await retrieve_context(
-                retrieve_q,
-                settings=s,
-                meta=meta,
+            retrieved = await _await_unless_disconnected(
+                request,
+                retrieve_context(
+                    retrieve_q,
+                    settings=s,
+                    meta=meta,
+                ),
             )
+            if retrieved is None:
+                return
+            chunks, routing_info = retrieved
         except RuntimeError as e:
             yield (json.dumps({"error": str(e)}, ensure_ascii=False) + "\n").encode()
             return
@@ -388,6 +409,9 @@ async def _ndjson_chat_events(body: ChatBody) -> AsyncIterator[bytes]:
             "rag_used": False,
             "skipped_retrieval": True,
         }
+
+    if await _cancelled():
+        return
 
     messages, rag_used = build_consult_chat_messages(
         phase=phase,
@@ -431,8 +455,13 @@ async def _ndjson_chat_events(body: ChatBody) -> AsyncIterator[bytes]:
         payload = {"sources": ctx_lines, "routing": routing_info}
         yield (json.dumps(payload, ensure_ascii=False) + "\n").encode()
 
+    if await _cancelled():
+        return
+
     assistant_acc = []
-    async for line in stream_chat_completion(s, messages):
+    async for line in stream_chat_completion(s, messages, should_stop=_cancelled):
+        if await _cancelled():
+            return
         try:
             obj = json.loads(line)
             if isinstance(obj.get("text"), str):
@@ -441,6 +470,9 @@ async def _ndjson_chat_events(body: ChatBody) -> AsyncIterator[bytes]:
             pass
         yield line.encode()
 
+    if await _cancelled():
+        return
+
     assistant_text = "".join(assistant_acc).strip()
     should_summarize = bool(assistant_text) and (
         len(history) + 1 >= 4 or len((context_summary or "")) > 0 or phase == "advise"
@@ -448,13 +480,19 @@ async def _ndjson_chat_events(body: ChatBody) -> AsyncIterator[bytes]:
     new_summary = context_summary
     if should_summarize:
         try:
-            new_summary = await refresh_context_summary(
-                settings=s,
-                previous_summary=context_summary,
-                history=history,
-                latest_user=user_text or "（截图）",
-                latest_assistant=assistant_text,
+            summarized = await _await_unless_disconnected(
+                request,
+                refresh_context_summary(
+                    settings=s,
+                    previous_summary=context_summary,
+                    history=history,
+                    latest_user=user_text or "（截图）",
+                    latest_assistant=assistant_text,
+                ),
             )
+            if summarized is None:
+                return
+            new_summary = summarized
         except Exception:  # noqa: BLE001
             new_summary = context_summary
 
@@ -468,10 +506,34 @@ async def _ndjson_chat_events(body: ChatBody) -> AsyncIterator[bytes]:
         ).encode()
 
 
+T = TypeVar("T")
+
+
+async def _await_unless_disconnected(request: Request, coro: Awaitable[T]) -> T | None:
+    """Run coroutine but cancel it if the client disconnects."""
+    task = asyncio.ensure_future(coro)
+    try:
+        while not task.done():
+            if await request.is_disconnected():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                return None
+            done, _pending = await asyncio.wait({task}, timeout=0.35)
+            if done:
+                break
+        return task.result()
+    except asyncio.CancelledError:
+        task.cancel()
+        raise
+
+
 @app.post("/api/chat")
-async def chat(body: ChatBody, user_id: CurrentUserId) -> StreamingResponse:  # noqa: ARG001
+async def chat(body: ChatBody, request: Request, user_id: CurrentUserId) -> StreamingResponse:  # noqa: ARG001
     return StreamingResponse(
-        _ndjson_chat_events(body),
+        _ndjson_chat_events(body, request),
         media_type="application/x-ndjson",
     )
 

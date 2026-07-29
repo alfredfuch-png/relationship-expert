@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 import httpx
@@ -172,6 +172,7 @@ def uses_kimi_chat(settings: Settings | None = None) -> bool:
 async def stream_chat_completion(
     settings: Settings,
     messages: list[dict[str, Any]],
+    should_stop: Callable[[], Awaitable[bool]] | None = None,
 ) -> AsyncIterator[str]:
     if uses_kimi_chat(settings):
         token = settings.kimi_api_key.strip()
@@ -223,6 +224,9 @@ async def stream_chat_completion(
 
                 buf = ""
                 async for chunk in resp.aiter_bytes():
+                    if should_stop and await should_stop():
+                        await resp.aclose()
+                        return
                     if not chunk:
                         continue
                     buf += chunk.decode(errors="ignore")

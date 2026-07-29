@@ -202,14 +202,42 @@ async function streamChat(
   onError: (e: string) => void,
   signal?: AbortSignal,
 ): Promise<'ok' | 'aborted' | 'error'> {
+  const waitAbort = (): Promise<'aborted'> =>
+    new Promise((resolve) => {
+      if (!signal) return
+      if (signal.aborted) {
+        resolve('aborted')
+        return
+      }
+      signal.addEventListener('abort', () => resolve('aborted'), { once: true })
+    })
+
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null
   try {
-    const res = await fetch('/api/chat', {
+    if (signal?.aborted) return 'aborted'
+
+    const fetchPromise = fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
       body: JSON.stringify(payload),
       signal,
     })
+
+    const fetchRace = await Promise.race([
+      fetchPromise.then((res) => ({ kind: 'res' as const, res })),
+      waitAbort().then(() => ({ kind: 'aborted' as const })),
+    ])
+    if (fetchRace.kind === 'aborted') {
+      try {
+        await fetchPromise
+      } catch {
+        /* aborted */
+      }
+      return 'aborted'
+    }
+
+    const res = fetchRace.res
     if (res.status === 401) {
       onError('请先登录后再提问。')
       return 'error'
@@ -231,9 +259,12 @@ async function streamChat(
       onError(detail ? `请求失败（${res.status}）：${detail}` : `请求失败（${res.status}）`)
       return 'error'
     }
-    const reader = res.body.getReader()
+
+    reader = res.body.getReader()
     const dec = new TextDecoder()
     let buf = ''
+    const abortP = waitAbort()
+
     while (true) {
       if (signal?.aborted) {
         try {
@@ -243,15 +274,35 @@ async function streamChat(
         }
         return 'aborted'
       }
-      const { done, value } = await reader.read()
-      if (done) break
-      buf += dec.decode(value, { stream: true })
+
+      const readP = reader.read().then((r) => ({ kind: 'read' as const, ...r }))
+      const step = await Promise.race([readP, abortP.then(() => ({ kind: 'aborted' as const }))])
+      if (step.kind === 'aborted') {
+        try {
+          await reader.cancel()
+        } catch {
+          /* ignore */
+        }
+        return 'aborted'
+      }
+      if (step.done) break
+      if (signal?.aborted) {
+        try {
+          await reader.cancel()
+        } catch {
+          /* ignore */
+        }
+        return 'aborted'
+      }
+
+      buf += dec.decode(step.value, { stream: true })
       for (;;) {
         const nl = buf.indexOf('\n')
         if (nl < 0) break
         const line = buf.slice(0, nl).trim()
         buf = buf.slice(nl + 1)
         if (!line) continue
+        if (signal?.aborted) return 'aborted'
         let obj: Record<string, unknown>
         try {
           obj = JSON.parse(line) as Record<string, unknown>
@@ -294,7 +345,7 @@ async function streamChat(
         }
       }
     }
-    return 'ok'
+    return signal?.aborted ? 'aborted' : 'ok'
   } catch (e) {
     if (
       signal?.aborted ||
@@ -305,6 +356,14 @@ async function streamChat(
     }
     onError(e instanceof Error ? e.message : String(e))
     return 'error'
+  } finally {
+    if (reader && signal?.aborted) {
+      try {
+        await reader.cancel()
+      } catch {
+        /* ignore */
+      }
+    }
   }
 }
 
@@ -335,6 +394,9 @@ export default function App() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef<AbortController | null>(null)
+  const runIdRef = useRef(0)
+  const stoppedRef = useRef(false)
+  const lastPromptRef = useRef('')
 
   const serverChat = Boolean(appConfig.server_chat)
   const activeThread = threads.find((t) => t.id === activeId)
@@ -507,12 +569,49 @@ export default function App() {
     }
   }
 
+  function restoreLastUserToComposer(fallbackText: string) {
+    let restoredText = fallbackText
+    setThreads((ts) =>
+      capThreads(
+        ts.map((t) => {
+          if (t.id !== activeId) return t
+          const copy = [...t.messages]
+          const last = copy[copy.length - 1]
+          if (last?.role === 'assistant' && !last.error) {
+            if (last.content.trim()) {
+              copy[copy.length - 1] = {
+                ...last,
+                content: last.content.includes('（已停止生成）')
+                  ? last.content
+                  : `${last.content.trim()}\n\n（已停止生成）`,
+              }
+              return { ...t, messages: copy, updatedAt: Date.now() }
+            }
+            copy.pop()
+          }
+          const userMsg = copy[copy.length - 1]
+          if (userMsg?.role === 'user') {
+            copy.pop()
+            restoredText =
+              userMsg.content
+                .replace(/\n\[已上传\d+张截图\]$/, '')
+                .replace(/^（上传了 \d+ 张截图）$/, '')
+                .trim() || fallbackText
+          }
+          return { ...t, messages: copy, updatedAt: Date.now() }
+        }),
+      ),
+    )
+    if (restoredText) setInput(restoredText)
+  }
+
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
     const q = input.trim()
     if ((!q && pendingImages.length === 0) || sending) return
     const imagesToSend = [...pendingImages]
     const previews = [...pendingPreviews]
+    lastPromptRef.current = q
     setInput('')
     setPendingImages([])
     setPendingPreviews([])
@@ -538,6 +637,9 @@ export default function App() {
         imageCount: imagesToSend.length || undefined,
       },
     ])
+
+    const runId = ++runIdRef.current
+    stoppedRef.current = false
     setSending(true)
 
     const controller = new AbortController()
@@ -550,6 +652,8 @@ export default function App() {
     let hadError = false
     let nextSummary = contextSummary
 
+    const stillActive = () => runId === runIdRef.current && !stoppedRef.current
+
     const result = await streamChat(
       {
         message: q,
@@ -558,12 +662,14 @@ export default function App() {
         images: imagesToSend,
       },
       (meta) => {
+        if (!stillActive()) return
         if (meta.sources) sources = meta.sources
         if (meta.routing) routing = { ...routing, ...meta.routing }
         if (meta.phase) phase = meta.phase
         if (meta.context_summary) nextSummary = meta.context_summary
       },
       (t) => {
+        if (!stillActive()) return
         acc += t
         updateActiveMessages((m) => {
           const copy = [...m]
@@ -577,6 +683,7 @@ export default function App() {
         })
       },
       (err) => {
+        if (!stillActive()) return
         hadError = true
         updateActiveMessages((m) => [
           ...m,
@@ -586,45 +693,10 @@ export default function App() {
       controller.signal,
     )
 
-    abortRef.current = null
+    if (abortRef.current === controller) abortRef.current = null
 
-    if (result === 'aborted') {
-      if (acc.trim()) {
-        updateActiveMessages((m) => {
-          const copy = [...m]
-          const last = copy[copy.length - 1]
-          if (last?.role === 'assistant' && !last.error) {
-            copy[copy.length - 1] = {
-              ...last,
-              content: `${acc.trim()}\n\n（已停止生成）`,
-              sources,
-              routing,
-              phase,
-            }
-          }
-          return copy
-        })
-      } else {
-        let restored = q
-        updateActiveMessages((m) => {
-          const copy = [...m]
-          const last = copy[copy.length - 1]
-          if (last?.role === 'assistant' && !last.content.trim() && !last.error) {
-            copy.pop()
-          }
-          const userMsg = copy[copy.length - 1]
-          if (userMsg?.role === 'user') {
-            copy.pop()
-            restored =
-              userMsg.content
-                .replace(/\n\[已上传\d+张截图\]$/, '')
-                .replace(/^（上传了 \d+ 张截图）$/, '')
-                .trim() || q
-          }
-          return copy
-        })
-        setInput(restored)
-      }
+    // Stop already unlocked the UI.
+    if (!stillActive() || result === 'aborted') {
       setSending(false)
       return
     }
@@ -646,7 +718,14 @@ export default function App() {
   }
 
   function handleStop() {
-    abortRef.current?.abort()
+    if (!sending && !abortRef.current) return
+    stoppedRef.current = true
+    runIdRef.current += 1
+    const controller = abortRef.current
+    abortRef.current = null
+    controller?.abort()
+    setSending(false)
+    restoreLastUserToComposer(lastPromptRef.current)
   }
 
   async function onPickImages(files: FileList | null) {
@@ -932,7 +1011,7 @@ export default function App() {
                     : '请先构建索引再发送'
               }
               value={input}
-              disabled={!ready || sending || !threadsLoaded}
+              disabled={!ready || !threadsLoaded}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) {
