@@ -299,8 +299,9 @@
 }
 
 .avatar {
-  width: 36px;
+  min-width: 36px;
   height: 36px;
+  padding: 0 4px;
   border-radius: 6px;
   background: var(--user-bg);
   display: grid;
@@ -308,6 +309,7 @@
   font-size: 11px;
   color: var(--muted);
   flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .bubble {

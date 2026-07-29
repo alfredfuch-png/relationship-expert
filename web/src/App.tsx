@@ -64,6 +64,15 @@ function titleFromMessages(messages: ChatMessage[], fallback: string): string {
   return line.length > 48 ? `${line.slice(0, 45)}…` : line
 }
 
+/** Strip common Markdown markers so plain chat bubbles stay readable. */
+function formatChatText(text: string): string {
+  return text
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/__([^_]+)__/g, '$1')
+    .replace(/(^|[\s，。；：、（）()【】])\*([^*\n]+)\*(?=[\s，。；：、（）()【】]|$)/g, '$1$2')
+    .replace(/^#{1,6}\s+/gm, '')
+}
+
 function loadPersisted(): { threads: ChatThread[]; activeId: string } | null {
   try {
     const raw = localStorage.getItem(LS_KEY)
@@ -724,7 +733,7 @@ export default function App() {
           ) : (
             messages.map((msg, i) => (
               <div key={`${activeId}-${i}-${msg.role}`} className={`bubble-row ${msg.role}`}>
-                <div className="avatar">{msg.role === 'user' ? '我' : '专家'}</div>
+                <div className="avatar">{msg.role === 'user' ? '我' : '阿FU'}</div>
                 <div className={`bubble ${msg.role}`}>
                   {msg.phase === 'clarify' ? (
                     <div className="phase-tag">追问中</div>
@@ -744,7 +753,9 @@ export default function App() {
                     <p className="err">{msg.error}</p>
                   ) : (
                     <div className="md">
-                      {msg.content || (sending && msg.role === 'assistant' ? '…' : '')}
+                      {formatChatText(
+                        msg.content || (sending && msg.role === 'assistant' ? '…' : ''),
+                      )}
                     </div>
                   )}
                   {appConfig.show_routing && msg.role === 'assistant' && msg.routing?.tag_routing ? (
