@@ -109,7 +109,12 @@ def build_consult_chat_messages(
     )
 
     settings = settings or get_settings()
-    phase_t: Phase = "advise" if phase == "advise" else "clarify"
+    if phase == "out_of_scope":
+        phase_t: Phase = "out_of_scope"
+    elif phase == "advise":
+        phase_t = "advise"
+    else:
+        phase_t = "clarify"
     relevant = filter_relevant_chunks(chunks, settings) if phase_t == "advise" else []
     use_notes = phase_t == "advise" and len(relevant) > 0
 
@@ -120,6 +125,19 @@ def build_consult_chat_messages(
         questions_guide=questions_guide,
     )
     messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
+
+    # Out-of-scope: keep prompt short — no long history/notes that tempt answering.
+    if phase_t == "out_of_scope":
+        messages.append(
+            {
+                "role": "user",
+                "content": build_multimodal_user_content(
+                    user_text or "（用户发了与亲密关系无关的内容）",
+                    images,
+                ),
+            }
+        )
+        return messages, False
 
     summary = (context_summary or "").strip()
     if summary:

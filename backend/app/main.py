@@ -403,6 +403,12 @@ async def _ndjson_chat_events(body: ChatBody, request: Request) -> AsyncIterator
         except Exception as e:  # noqa: BLE001
             yield (json.dumps({"error": f"检索失败：{e!s}"}, ensure_ascii=False) + "\n").encode()
             return
+    elif phase == "out_of_scope":
+        routing_info = {
+            "phase": "out_of_scope",
+            "rag_used": False,
+            "skipped_retrieval": True,
+        }
     else:
         routing_info = {
             "phase": "clarify",
@@ -474,8 +480,10 @@ async def _ndjson_chat_events(body: ChatBody, request: Request) -> AsyncIterator
         return
 
     assistant_text = "".join(assistant_acc).strip()
-    should_summarize = bool(assistant_text) and (
-        len(history) + 1 >= 4 or len((context_summary or "")) > 0 or phase == "advise"
+    should_summarize = (
+        bool(assistant_text)
+        and phase != "out_of_scope"
+        and (len(history) + 1 >= 4 or len((context_summary or "")) > 0 or phase == "advise")
     )
     new_summary = context_summary
     if should_summarize:

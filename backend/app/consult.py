@@ -10,7 +10,7 @@ import httpx
 from app.http_client import async_gateway_client
 from app.settings import Settings, get_settings, _project_root
 
-Phase = Literal["clarify", "advise"]
+Phase = Literal["clarify", "advise", "out_of_scope"]
 
 SKIP_ADVISE_PATTERNS = (
     "直接说",
@@ -20,6 +20,23 @@ SKIP_ADVISE_PATTERNS = (
     "直接回答",
     "跳过追问",
     "给我答案",
+)
+
+PERSONA_AND_SCOPE = (
+    "【人设】\n"
+    "你是「阿FU」：专注亲密关系与情感相处的顾问。"
+    "服务范围仅限：恋爱、相亲、择偶、追求与表白、相处与沟通、边界与安全感、"
+    "矛盾冲突、分手复合、婚姻与长期关系、亲密关系相关的自我成长与情绪梳理。\n"
+    "【边界（必须遵守）】\n"
+    "- 只回答上述范围内的问题；不要充当百科、编程、理财、时政、医疗诊断、法律代理、"
+    "学业考试、游戏攻略、闲聊百科等全能助手。\n"
+    "- 若用户问题明显跑题（如写代码、做数学题、聊新闻八卦、点外卖、写公文等），"
+    "不要硬答内容；用一两句温和说明你只做亲密关系咨询，并邀请对方改问感情/关系相关问题。"
+    "可随口举 1 个可问的例子（如「对方冷淡怎么办」「怎么判断他是否认真」）。\n"
+    "- 截图/聊天记录若明显是恋爱相处相关，按咨询处理；若截图内容与亲密关系无关，同样婉拒展开。\n"
+    "- 涉及自伤、他伤、家暴等紧急危险：敦促立即寻求现实中的紧急帮助（如报警、热线、身边可信的人），"
+    "不要展开无关主题，也不要装作能提供危机干预专业处置。\n"
+    "- 这是咨询与反思支持，不是医疗/法律建议；不要编造用户没说过的个人事实。\n"
 )
 
 
@@ -53,19 +70,29 @@ def build_consult_system_prompt(
 ) -> str:
     guide = questions_guide.strip()
     common = (
-        "你是「阿FU」，用户的亲密关系顾问（恋爱、婚姻、择偶、相处、矛盾等）。"
-        "语气温暖、务实，像真人顾问微信聊天，不要写成报告或小论文。"
-        "这是咨询与反思支持，不是医疗/法律建议。"
-        "不要编造用户没说过的个人事实。"
-        "\n\n【排版格式（必须遵守）】\n"
-        "- 不要使用 Markdown：禁止 **加粗**、*斜体*、# 标题、```代码块、[链接](url) 等标记。\n"
-        "- 用换行分段；列举用「1.」「2.」或「一、二、」即可。\n"
-        "- 需要强调时用中文自然说法（如「重点是」「建议你先…」），不要用星号包文字。\n"
+        PERSONA_AND_SCOPE
+        + "语气温暖、务实，像真人顾问微信聊天，不要写成报告或小论文。"
+        + "\n\n【排版格式（必须遵守）】\n"
+        + "- 不要使用 Markdown：禁止 **加粗**、*斜体*、# 标题、```代码块、[链接](url) 等标记。\n"
+        + "- 用换行分段；列举用「1.」「2.」或「一、二、」即可。\n"
+        + "- 需要强调时用中文自然说法（如「重点是」「建议你先…」），不要用星号包文字。\n"
+    )
+    if phase == "out_of_scope":
+        common += (
+            "\n【当前阶段：范围外】用户本轮问题不在亲密关系咨询范围内。"
+            "不要回答该题的具体内容（不要写代码、解题、科普跑题知识）。"
+            "简短、友好地说明你是亲密关系顾问阿FU，只能聊感情与关系，并请对方换一个相关问题。"
+            "全文控制在三四句以内。"
+        )
+        return common
+
+    common += (
         f"\n【追问与建议规则（必须遵守）】\n{guide}\n"
         "额外硬性约束：\n"
         "- 若本轮是追问阶段：只补关键缺口，每次回复里问句不超过 3 个；可鼓励用户上传聊天截图或粘贴关键对话原文。\n"
         "- 若本轮是建议阶段：给出分段、可执行的建议；篇幅可稍长，但结构清晰。\n"
         "- 用户说「直接说 / 不用问了」等时，必须进入建议，不再追问。\n"
+        "- 全程不要偏离亲密关系主题去回答无关知识。\n"
     )
     if phase == "clarify":
         common += (
@@ -149,14 +176,7 @@ async def decide_phase(
     has_images: bool,
     questions_guide: str,
 ) -> Phase:
-    if wants_skip_clarify(user_message):
-        return "advise"
-
-    # Enough back-and-forth and summary already present → lean advise
     user_turns = sum(1 for m in history if m.get("role") == "user")
-    if context_summary.strip() and user_turns >= 3 and not _looks_sparse(user_message):
-        # Still ask model if latest message introduces a new topic needing clarify
-        pass
 
     hist_snip = []
     for m in history[-8:]:
@@ -167,14 +187,19 @@ async def decide_phase(
     summary = context_summary.strip() or "(无)"
 
     prompt = (
-        "根据咨询规则判断下一轮应处于哪一阶段。只输出 JSON："
-        '{"phase":"clarify"} 或 {"phase":"advise"}。\n'
-        "clarify=明显缺关键背景，应先追问；advise=信息已够或应给建议。\n"
-        f"规则摘要：\n{questions_guide[:3500]}\n\n"
+        "你是亲密关系咨询的路由分类器。只输出一个 JSON："
+        '{"phase":"out_of_scope"} 或 {"phase":"clarify"} 或 {"phase":"advise"}。\n'
+        "判定优先级：\n"
+        "1) out_of_scope：本轮主诉求与亲密关系/恋爱/婚姻/择偶/相处/情感沟通无关"
+        "（如写代码、数学题、时政、旅游攻略、纯闲聊百科等）。有聊天截图且内容是感情互动则不算跑题。\n"
+        "2) clarify：在范围内，但关键背景明显不足，应先追问。\n"
+        "3) advise：在范围内，信息已够或用户要求直接给建议。\n"
+        f"规则摘要：\n{questions_guide[:2800]}\n\n"
         f"上下文摘要：\n{summary}\n\n"
         f"最近对话：\n{hist_text}\n\n"
         f"用户本轮：{user_message[:1500]}\n"
         f"本轮是否附带截图：{'是' if has_images else '否'}\n"
+        f"用户是否要求跳过追问：{'是' if wants_skip_clarify(user_message) else '否'}\n"
     )
     raw = await _chat_json(
         settings,
@@ -189,11 +214,15 @@ async def decide_phase(
     )
     phase = _parse_phase_json(raw)
     if phase:
+        if phase != "out_of_scope" and wants_skip_clarify(user_message):
+            return "advise"
         return phase
 
     # Heuristic fallback
     if user_turns == 0 and not context_summary.strip() and len(user_message.strip()) < 80:
         return "clarify"
+    if wants_skip_clarify(user_message):
+        return "advise"
     if user_turns >= 4 or (context_summary.strip() and user_turns >= 2):
         return "advise"
     return "clarify"
@@ -208,17 +237,20 @@ def _parse_phase_json(raw: str) -> Phase | None:
         return None
     m = re.search(r"\{[^{}]*\}", raw)
     if not m:
-        if "advise" in raw.lower() and "clarify" not in raw.lower():
+        low = raw.lower()
+        if "out_of_scope" in low or "out-of-scope" in low or "跑题" in raw:
+            return "out_of_scope"
+        if "advise" in low and "clarify" not in low:
             return "advise"
-        if "clarify" in raw.lower():
+        if "clarify" in low:
             return "clarify"
         return None
     try:
         obj = json.loads(m.group(0))
     except json.JSONDecodeError:
         return None
-    phase = str(obj.get("phase", "")).strip().lower()
-    if phase in ("clarify", "advise"):
+    phase = str(obj.get("phase", "")).strip().lower().replace("-", "_")
+    if phase in ("clarify", "advise", "out_of_scope"):
         return phase  # type: ignore[return-value]
     return None
 
