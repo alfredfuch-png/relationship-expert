@@ -11,6 +11,7 @@ logger = logging.getLogger(__name__)
 
 from app.indexing import read_index_meta
 from app.settings import Settings, get_settings
+from app.users_db_sync import restore_users_db_from_r2, r2_sync_configured
 from app.users_store import bootstrap_users, has_users, init_db, users_db_path
 
 
@@ -57,46 +58,66 @@ def _extract_users_db_from_zip(payload: bytes, dest: Path) -> bool:
 def _restore_users_db_from_index_bundle(settings: Settings) -> bool:
     """Legacy: only if an old public index zip still contains users.db."""
     path = users_db_path(settings)
-    if path.is_file():
+    if path.is_file() and has_users(settings):
         return False
     url = (settings.index_bundle_url or "").strip()
     if not url:
         return False
-    payload = _fetch_url(url, settings)
+    try:
+        payload = _fetch_url(url, settings)
+    except (HTTPError, URLError, TimeoutError, RuntimeError, OSError) as exc:
+        logger.warning("Could not restore users.db from INDEX_BUNDLE_URL (%s)", exc)
+        return False
     if _extract_users_db_from_zip(payload, path):
         init_db(settings)
-        return True
+        return has_users(settings)
     return False
 
 
+def _restore_users_db_from_url(settings: Settings, path: Path) -> bool:
+    url = (settings.users_db_url or "").strip()
+    if not url:
+        return False
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = _fetch_url(url, settings)
+        if payload[:2] == b"PK":
+            if not _extract_users_db_from_zip(payload, path):
+                logger.warning("users.db not found inside zip from USERS_DB_URL")
+                return False
+        else:
+            path.write_bytes(payload)
+        init_db(settings)
+        return has_users(settings)
+    except (HTTPError, URLError, TimeoutError, RuntimeError, OSError) as exc:
+        logger.warning(
+            "Could not restore users.db from USERS_DB_URL (%s); will try R2 API if configured.",
+            exc,
+        )
+        return False
+
+
 def ensure_users_db(settings: Settings | None = None) -> None:
-    """Restore users.db from USERS_DB_URL (private), not from public index bundle."""
+    """Restore users.db: keep non-empty local DB, else R2 S3 → USERS_DB_URL → legacy."""
     settings = settings or get_settings()
     path = users_db_path(settings)
+
     if path.is_file():
         init_db(settings)
-        return
+        if has_users(settings):
+            return
+        logger.warning("Local users.db exists but has no accounts; attempting restore from backup.")
 
-    url = (settings.users_db_url or "").strip()
-    if url:
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            payload = _fetch_url(url, settings)
-            if payload[:2] == b"PK":
-                if not _extract_users_db_from_zip(payload, path):
-                    logger.warning("users.db not found inside zip from USERS_DB_URL")
-                else:
-                    init_db(settings)
-                    return
-            else:
-                path.write_bytes(payload)
-                init_db(settings)
+    # Prefer authenticated R2 download (public USERS_DB_URL often 403 on private buckets).
+    if r2_sync_configured(settings):
+        if restore_users_db_from_r2(settings):
+            init_db(settings)
+            if has_users(settings):
                 return
-        except (HTTPError, URLError, TimeoutError, RuntimeError, OSError) as exc:
-            logger.warning(
-                "Could not restore users.db from USERS_DB_URL (%s); starting with empty database.",
-                exc,
-            )
+            logger.warning("R2 restore succeeded but users.db still has no accounts.")
+
+    if _restore_users_db_from_url(settings, path):
+        return
 
     if _restore_users_db_from_index_bundle(settings):
         return

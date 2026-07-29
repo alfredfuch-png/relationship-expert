@@ -103,6 +103,43 @@ def sync_users_db_to_r2(settings: Settings | None = None, *, force: bool = False
             return False
 
 
+def restore_users_db_from_r2(settings: Settings | None = None) -> bool:
+    """Download users.db zip from R2 via S3 API. Returns True when restored."""
+    settings = settings or get_settings()
+    if not r2_sync_configured(settings):
+        return False
+
+    db_path = users_db_path(settings)
+    _account, _key_id, _secret, bucket, obj_key = _r2_settings(settings)
+
+    try:
+        client = _r2_client(settings)
+        obj = client.get_object(Bucket=bucket, Key=obj_key)
+        payload = obj["Body"].read()
+    except Exception:
+        logger.exception("Failed to download users.db from R2")
+        return False
+
+    if not payload:
+        logger.warning("R2 users.db object is empty")
+        return False
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    if payload[:2] == b"PK":
+        with zipfile.ZipFile(io.BytesIO(payload)) as zf:
+            for name in zf.namelist():
+                if name.endswith("users.db"):
+                    db_path.write_bytes(zf.read(name))
+                    logger.info("Restored users.db from R2 zip (%s bytes)", db_path.stat().st_size)
+                    return True
+        logger.warning("users.db not found inside R2 zip")
+        return False
+
+    db_path.write_bytes(payload)
+    logger.info("Restored users.db from R2 raw object (%s bytes)", len(payload))
+    return True
+
+
 def schedule_users_db_sync(settings: Settings | None = None, *, force: bool = False) -> None:
     """Fire-and-forget sync (for BackgroundTasks)."""
     sync_users_db_to_r2(settings, force=force)
