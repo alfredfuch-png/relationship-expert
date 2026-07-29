@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type MouseEvent } from 'react'
+import { flushSync } from 'react-dom'
 import './App.css'
 
 type Role = 'user' | 'assistant'
@@ -397,6 +398,16 @@ export default function App() {
   const runIdRef = useRef(0)
   const stoppedRef = useRef(false)
   const lastPromptRef = useRef('')
+  const threadsRef = useRef(threads)
+  const activeIdRef = useRef(activeId)
+
+  useEffect(() => {
+    threadsRef.current = threads
+  }, [threads])
+
+  useEffect(() => {
+    activeIdRef.current = activeId
+  }, [activeId])
 
   const serverChat = Boolean(appConfig.server_chat)
   const activeThread = threads.find((t) => t.id === activeId)
@@ -569,49 +580,14 @@ export default function App() {
     }
   }
 
-  function restoreLastUserToComposer(fallbackText: string) {
-    let restoredText = fallbackText
-    setThreads((ts) =>
-      capThreads(
-        ts.map((t) => {
-          if (t.id !== activeId) return t
-          const copy = [...t.messages]
-          const last = copy[copy.length - 1]
-          if (last?.role === 'assistant' && !last.error) {
-            if (last.content.trim()) {
-              copy[copy.length - 1] = {
-                ...last,
-                content: last.content.includes('（已停止生成）')
-                  ? last.content
-                  : `${last.content.trim()}\n\n（已停止生成）`,
-              }
-              return { ...t, messages: copy, updatedAt: Date.now() }
-            }
-            copy.pop()
-          }
-          const userMsg = copy[copy.length - 1]
-          if (userMsg?.role === 'user') {
-            copy.pop()
-            restoredText =
-              userMsg.content
-                .replace(/\n\[已上传\d+张截图\]$/, '')
-                .replace(/^（上传了 \d+ 张截图）$/, '')
-                .trim() || fallbackText
-          }
-          return { ...t, messages: copy, updatedAt: Date.now() }
-        }),
-      ),
-    )
-    if (restoredText) setInput(restoredText)
-  }
-
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
     const q = input.trim()
     if ((!q && pendingImages.length === 0) || sending) return
     const imagesToSend = [...pendingImages]
     const previews = [...pendingPreviews]
-    lastPromptRef.current = q
+    lastPromptRef.current =
+      q || (imagesToSend.length ? `（上传了 ${imagesToSend.length} 张截图）` : '')
     setInput('')
     setPendingImages([])
     setPendingPreviews([])
@@ -695,9 +671,9 @@ export default function App() {
 
     if (abortRef.current === controller) abortRef.current = null
 
-    // Stop already unlocked the UI.
+    // Stop already unlocked the UI; keep sending=false even if stream ends late.
     if (!stillActive() || result === 'aborted') {
-      setSending(false)
+      flushSync(() => setSending(false))
       return
     }
 
@@ -717,15 +693,44 @@ export default function App() {
     }
   }
 
-  function handleStop() {
-    if (!sending && !abortRef.current) return
+  function handleStop(e?: MouseEvent<HTMLButtonElement>) {
+    e?.preventDefault()
+    e?.stopPropagation()
+
     stoppedRef.current = true
     runIdRef.current += 1
     const controller = abortRef.current
     abortRef.current = null
-    controller?.abort()
-    setSending(false)
-    restoreLastUserToComposer(lastPromptRef.current)
+    try {
+      controller?.abort()
+    } catch {
+      /* ignore */
+    }
+
+    const aid = activeIdRef.current
+    const msgs = [...(threadsRef.current.find((t) => t.id === aid)?.messages ?? [])]
+    let restore = lastPromptRef.current
+    if (msgs.length && msgs[msgs.length - 1]?.role === 'assistant') {
+      msgs.pop()
+    }
+    if (msgs.length && msgs[msgs.length - 1]?.role === 'user') {
+      const userMsg = msgs.pop()!
+      restore =
+        userMsg.content
+          .replace(/\n\[已上传\d+张截图\]$/, '')
+          .replace(/^（上传了 \d+ 张截图）$/, '')
+          .trim() || restore
+    }
+
+    flushSync(() => {
+      setSending(false)
+      setInput(restore)
+      setThreads((ts) =>
+        capThreads(
+          ts.map((t) => (t.id === aid ? { ...t, messages: msgs, updatedAt: Date.now() } : t)),
+        ),
+      )
+    })
   }
 
   async function onPickImages(files: FileList | null) {
@@ -1021,7 +1026,11 @@ export default function App() {
               }}
             />
             {sending ? (
-              <button type="button" className="btn send stop" onClick={handleStop}>
+              <button
+                type="button"
+                className="btn send stop"
+                onClick={(ev) => handleStop(ev)}
+              >
                 停止
               </button>
             ) : (
