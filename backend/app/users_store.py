@@ -53,6 +53,12 @@ def init_db(settings: Settings | None = None) -> None:
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS user_memory (
+                user_id TEXT PRIMARY KEY,
+                memory_text TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
             CREATE TABLE IF NOT EXISTS registration_invite_state (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 invite_code_hash TEXT NOT NULL,
@@ -301,3 +307,51 @@ def save_chat_state(user_id: str, state: dict, settings: Settings | None = None)
         conn.commit()
     finally:
         conn.close()
+
+
+def load_user_memory(user_id: str, settings: Settings | None = None) -> str:
+    """Return cross-thread long-term memory text for an account user."""
+    if not user_id or user_id in ("anonymous", "shared"):
+        return ""
+    init_db(settings)
+    conn = _connect(settings)
+    try:
+        row = conn.execute(
+            "SELECT memory_text FROM user_memory WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        if not row:
+            return ""
+        return str(row["memory_text"] or "").strip()
+    finally:
+        conn.close()
+
+
+def save_user_memory(user_id: str, memory_text: str, settings: Settings | None = None) -> None:
+    if not user_id or user_id in ("anonymous", "shared"):
+        return
+    init_db(settings)
+    now = datetime.now(UTC).isoformat()
+    text = (memory_text or "").strip()
+    conn = _connect(settings)
+    try:
+        if not text:
+            conn.execute("DELETE FROM user_memory WHERE user_id = ?", (user_id,))
+        else:
+            conn.execute(
+                """
+                INSERT INTO user_memory (user_id, memory_text, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    memory_text = excluded.memory_text,
+                    updated_at = excluded.updated_at
+                """,
+                (user_id, text[:12000], now),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def clear_user_memory(user_id: str, settings: Settings | None = None) -> None:
+    save_user_memory(user_id, "", settings)

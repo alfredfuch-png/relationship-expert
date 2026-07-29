@@ -26,7 +26,7 @@ PERSONA_AND_SCOPE = (
     "【人设】\n"
     "你是「阿FU」：专注亲密关系与情感相处的顾问。"
     "服务范围仅限：恋爱、相亲、择偶、追求与表白、相处与沟通、边界与安全感、"
-    "矛盾冲突、分手复合、婚姻与长期关系、亲密关系相关的自我成长与情绪梳理。\n"
+    "矛盾冲突、婚姻与长期关系、亲密关系相关的自我成长与情绪梳理。\n"
     "【边界（必须遵守）】\n"
     "- 只回答上述范围内的问题；不要充当百科、编程、理财、时政、医疗诊断、法律代理、"
     "学业考试、游戏攻略、闲聊百科等全能助手。\n"
@@ -37,6 +37,8 @@ PERSONA_AND_SCOPE = (
     "- 涉及自伤、他伤、家暴等紧急危险：敦促立即寻求现实中的紧急帮助（如报警、热线、身边可信的人），"
     "不要展开无关主题，也不要装作能提供危机干预专业处置。\n"
     "- 这是咨询与反思支持，不是医疗/法律建议；不要编造用户没说过的个人事实。\n"
+    "- 若提供了【用户长时记忆】：可参考其中的用户画像与多名对象档案，但以本轮主题为准；"
+    "不要把甲的事实安到乙身上，也不要提及「记忆系统/数据库」等内部机制。\n"
 )
 
 
@@ -285,6 +287,56 @@ async def refresh_context_summary(
         max_tokens=600,
     )
     return out or previous_summary.strip()
+
+
+async def refresh_user_memory(
+    *,
+    settings: Settings,
+    previous_memory: str,
+    latest_user: str,
+    latest_assistant: str,
+    thread_summary: str = "",
+    phase: str = "advise",
+) -> str:
+    """Merge this turn into a durable cross-thread user memory (Chinese)."""
+    prompt = (
+        "你在维护用户的「跨对话长时记忆」，供亲密关系顾问在不同聊天窗口复用。\n"
+        "要求：\n"
+        "1) 用结构化中文分段输出，建议标题：用户自身 / 重要他人 / 进行中的议题 / 已给建议要点。\n"
+        "2) 重要他人按称呼分条（如「小王」「前男友」），写清关系阶段与关键事实。\n"
+        "3) 合并旧记忆与本轮新信息；过时细节可删减，多对象档案尽量保留。\n"
+        "4) 不要编造；未知写「未提供」。不要空话。全文尽量不超过 2500 字。\n"
+        "5) 直接输出记忆正文，不要前言。\n\n"
+        f"阶段：{phase}\n"
+        f"旧记忆：\n{previous_memory.strip() or '(无)'}\n\n"
+        f"本线程摘要（可空）：\n{thread_summary.strip() or '(无)'}\n\n"
+        f"最新用户：{latest_user[:1500]}\n"
+        f"最新助手：{latest_assistant[:2000]}\n"
+    )
+    out = await _chat_json(
+        settings,
+        [
+            {"role": "system", "content": "你是用户长时记忆压缩助手。只输出记忆正文。"},
+            {"role": "user", "content": prompt},
+        ],
+        max_tokens=900,
+    )
+    text = (out or previous_memory).strip()
+    if len(text) > 12000:
+        text = text[:12000]
+    return text
+
+
+def should_update_user_memory(*, phase: str, user_text: str, assistant_text: str) -> bool:
+    """advise always (with reply); clarify when user shared substantive facts."""
+    if phase == "out_of_scope":
+        return False
+    if not (assistant_text or "").strip():
+        return False
+    if phase == "advise":
+        return True
+    # clarify: only if user said something with some substance
+    return len((user_text or "").strip()) >= 20
 
 
 def build_history_messages(

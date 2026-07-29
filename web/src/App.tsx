@@ -398,6 +398,9 @@ export default function App() {
   const [sending, setSending] = useState(false)
   const [pendingImages, setPendingImages] = useState<ChatImagePayload[]>([])
   const [pendingPreviews, setPendingPreviews] = useState<string[]>([])
+  const [memoryOpen, setMemoryOpen] = useState(false)
+  const [memoryText, setMemoryText] = useState('')
+  const [memoryLoading, setMemoryLoading] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef<AbortController | null>(null)
@@ -748,6 +751,41 @@ export default function App() {
     }
   }
 
+  async function openMemoryPanel() {
+    setMemoryOpen(true)
+    setMemoryLoading(true)
+    try {
+      const r = await fetch('/api/user/memory', { credentials: 'include' })
+      if (!r.ok) {
+        setMemoryText(r.status === 400 ? '登录账户后才会保存跨对话记忆。' : '无法加载记忆。')
+        return
+      }
+      const data = (await r.json()) as { memory?: string }
+      setMemoryText((data.memory || '').trim() || '（暂无长时记忆。有效咨询后会自动积累。）')
+    } catch {
+      setMemoryText('无法加载记忆。')
+    } finally {
+      setMemoryLoading(false)
+    }
+  }
+
+  async function clearMemory() {
+    if (!confirm('确定清空跨对话长时记忆？之后新对话将不再引用旧对象信息。')) return
+    setMemoryLoading(true)
+    try {
+      const r = await fetch('/api/user/memory', { method: 'DELETE', credentials: 'include' })
+      if (!r.ok) {
+        alert('清空失败')
+        return
+      }
+      setMemoryText('（暂无长时记忆。有效咨询后会自动积累。）')
+    } catch {
+      alert('清空失败')
+    } finally {
+      setMemoryLoading(false)
+    }
+  }
+
   async function onPickImages(files: FileList | null) {
     if (!files || files.length === 0) return
     const room = MAX_IMAGES - pendingImages.length
@@ -862,6 +900,15 @@ export default function App() {
           ) : (
             <span>聊天：Kimi · 知识库检索仅在建议阶段</span>
           )}
+          {appConfig.username ? (
+            <button
+              type="button"
+              className="btn secondary logout-btn"
+              onClick={() => void openMemoryPanel()}
+            >
+              我的记忆
+            </button>
+          ) : null}
           {appConfig.auth_required ? (
             <button
               type="button"
@@ -877,6 +924,39 @@ export default function App() {
           ) : null}
         </footer>
       </aside>
+
+      {memoryOpen ? (
+        <div
+          className="memory-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-label="我的记忆"
+          onClick={() => setMemoryOpen(false)}
+        >
+          <div className="memory-panel" onClick={(e) => e.stopPropagation()}>
+            <div className="memory-head">
+              <h2>我的记忆</h2>
+              <button type="button" className="btn secondary" onClick={() => setMemoryOpen(false)}>
+                关闭
+              </button>
+            </div>
+            <p className="muted small">
+              跨对话自动积累的用户画像与对象档案，仅你的账户可见。
+            </p>
+            <pre className="memory-body">{memoryLoading ? '加载中…' : memoryText}</pre>
+            <div className="memory-actions">
+              <button
+                type="button"
+                className="btn secondary"
+                disabled={memoryLoading}
+                onClick={() => void clearMemory()}
+              >
+                清空记忆
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <main className="chat-panel">
         <header className="topbar">

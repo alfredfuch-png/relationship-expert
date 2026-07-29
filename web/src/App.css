@@ -526,6 +526,59 @@
   cursor: not-allowed;
 }
 
+.memory-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(0, 0, 0, 0.55);
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+}
+
+.memory-panel {
+  width: min(560px, 100%);
+  max-height: min(80vh, 720px);
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1rem 1.1rem 1.15rem;
+}
+
+.memory-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.35rem;
+}
+
+.memory-head h2 {
+  margin: 0;
+  font-size: 1.1rem;
+}
+
+.memory-body {
+  margin: 0.75rem 0;
+  padding: 0.75rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+  font-size: 0.9rem;
+  line-height: 1.5;
+  max-height: 48vh;
+  overflow: auto;
+}
+
+.memory-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
 @media (max-width: 720px) {
   .shell {
     grid-template-columns: 1fr;

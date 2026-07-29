@@ -99,6 +99,7 @@ def build_consult_chat_messages(
     images: list[dict[str, str]],
     questions_guide: str,
     settings: Settings | None = None,
+    user_memory: str = "",
 ) -> tuple[list[dict[str, Any]], bool]:
     """Build messages for clarify/advise consult flow. Returns (messages, rag_used)."""
     from app.consult import (
@@ -138,6 +139,15 @@ def build_consult_chat_messages(
             }
         )
         return messages, False
+
+    memory = (user_memory or "").strip()
+    if memory:
+        messages.append(
+            {
+                "role": "system",
+                "content": f"【用户长时记忆（跨对话，可能含多人；本轮主题优先）】\n{memory}",
+            }
+        )
 
     summary = (context_summary or "").strip()
     if summary:

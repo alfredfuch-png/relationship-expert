@@ -33,7 +33,13 @@ from app.chat import (
     stream_chat_completion,
     uses_kimi_chat,
 )
-from app.consult import decide_phase, load_questions_guide, refresh_context_summary
+from app.consult import (
+    decide_phase,
+    load_questions_guide,
+    refresh_context_summary,
+    refresh_user_memory,
+    should_update_user_memory,
+)
 from app.indexing import read_index_meta, rebuild_index_async
 from app.retrieve import retrieve_context
 from app.settings import _project_root, get_settings
@@ -41,12 +47,15 @@ from app.startup import prepare_runtime_data
 from app.users_db_sync import r2_sync_configured, schedule_users_db_sync, sync_secret, sync_users_db_to_r2
 from app.users_store import (
     RegistrationInviteLimitError,
+    clear_user_memory,
     consume_registration_slot,
     create_user,
     load_chat_state,
+    load_user_memory,
     registration_slots_remaining,
     release_registration_slot,
     save_chat_state,
+    save_user_memory,
 )
 
 
@@ -338,7 +347,11 @@ async def run_index(user_id: CurrentUserId) -> dict:  # noqa: ARG001
         raise HTTPException(status_code=500, detail=str(e)) from e
 
 
-async def _ndjson_chat_events(body: ChatBody, request: Request) -> AsyncIterator[bytes]:
+async def _ndjson_chat_events(
+    body: ChatBody,
+    request: Request,
+    user_id: str,
+) -> AsyncIterator[bytes]:
     s = get_settings()
     yield (json.dumps({"meta": {"status": "started"}}, ensure_ascii=False) + "\n").encode()
 
@@ -350,6 +363,8 @@ async def _ndjson_chat_events(body: ChatBody, request: Request) -> AsyncIterator
     images = [{"mime": i.mime, "data_base64": i.data_base64} for i in body.images]
     context_summary = body.context_summary.strip()
     questions_guide = load_questions_guide()
+    account_user = user_id not in ("anonymous", "shared")
+    user_memory = load_user_memory(user_id, s) if account_user else ""
 
     if await _cancelled():
         return
@@ -428,9 +443,11 @@ async def _ndjson_chat_events(body: ChatBody, request: Request) -> AsyncIterator
         images=images,
         questions_guide=questions_guide,
         settings=s,
+        user_memory=user_memory,
     )
     routing_info["rag_used"] = rag_used
     routing_info["phase"] = phase
+    routing_info["user_memory_used"] = bool(user_memory)
     relevant_chunks = filter_relevant_chunks(chunks, s) if rag_used else []
 
     if s.public_deploy:
@@ -441,6 +458,7 @@ async def _ndjson_chat_events(body: ChatBody, request: Request) -> AsyncIterator
                         "public_deploy": True,
                         "rag_used": rag_used,
                         "phase": phase,
+                        "user_memory_used": bool(user_memory),
                     }
                 },
                 ensure_ascii=False,
@@ -513,6 +531,59 @@ async def _ndjson_chat_events(body: ChatBody, request: Request) -> AsyncIterator
             + "\n"
         ).encode()
 
+    # Cross-thread long-term memory (account users only).
+    if account_user and should_update_user_memory(
+        phase=phase,
+        user_text=user_text,
+        assistant_text=assistant_text,
+    ):
+        try:
+            merged = await _await_unless_disconnected(
+                request,
+                refresh_user_memory(
+                    settings=s,
+                    previous_memory=user_memory,
+                    latest_user=user_text or "（截图）",
+                    latest_assistant=assistant_text,
+                    thread_summary=new_summary or context_summary,
+                    phase=phase,
+                ),
+            )
+            if merged is None:
+                return
+            if merged.strip() and merged.strip() != user_memory.strip():
+                save_user_memory(user_id, merged, s)
+                if r2_sync_configured(s):
+                    schedule_users_db_sync(s, True)
+                yield (
+                    json.dumps(
+                        {"meta": {"user_memory_updated": True, "phase": phase}},
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                ).encode()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+@app.get("/api/user/memory")
+def get_user_memory(user_id: CurrentUserId) -> dict:
+    if user_id in ("anonymous", "shared"):
+        raise HTTPException(status_code=400, detail="需要登录账户才能使用长时记忆。")
+    text = load_user_memory(user_id)
+    return {"memory": text, "updated": bool(text)}
+
+
+@app.delete("/api/user/memory")
+def delete_user_memory(user_id: CurrentUserId, background_tasks: BackgroundTasks) -> dict:
+    if user_id in ("anonymous", "shared"):
+        raise HTTPException(status_code=400, detail="需要登录账户才能使用长时记忆。")
+    clear_user_memory(user_id)
+    s = get_settings()
+    if r2_sync_configured(s):
+        background_tasks.add_task(schedule_users_db_sync, s, True)
+    return {"ok": True, "memory": ""}
+
 
 T = TypeVar("T")
 
@@ -539,9 +610,9 @@ async def _await_unless_disconnected(request: Request, coro: Awaitable[T]) -> T 
 
 
 @app.post("/api/chat")
-async def chat(body: ChatBody, request: Request, user_id: CurrentUserId) -> StreamingResponse:  # noqa: ARG001
+async def chat(body: ChatBody, request: Request, user_id: CurrentUserId) -> StreamingResponse:
     return StreamingResponse(
-        _ndjson_chat_events(body, request),
+        _ndjson_chat_events(body, request, user_id),
         media_type="application/x-ndjson",
     )
 
