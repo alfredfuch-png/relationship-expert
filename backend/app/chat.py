@@ -227,6 +227,7 @@ async def stream_chat_completion(
         "model": model,
         "messages": messages,
         "stream": True,
+        "stream_options": {"include_usage": True},
     }
     # kimi-k3: always thinking; temperature fixed at 1; prefer faster replies for chat UX
     if uses_kimi_chat(settings):
@@ -273,6 +274,26 @@ async def stream_chat_completion(
                             obj = json.loads(data)
                         except json.JSONDecodeError:
                             continue
+                        usage_raw = obj.get("usage")
+                        if isinstance(usage_raw, dict) and (
+                            usage_raw.get("prompt_tokens") is not None
+                            or usage_raw.get("completion_tokens") is not None
+                            or usage_raw.get("total_tokens") is not None
+                        ):
+                            pt = int(usage_raw.get("prompt_tokens") or 0)
+                            ct = int(usage_raw.get("completion_tokens") or 0)
+                            tt = int(usage_raw.get("total_tokens") or (pt + ct))
+                            yield json.dumps(
+                                {
+                                    "usage": {
+                                        "model": model,
+                                        "prompt_tokens": pt,
+                                        "completion_tokens": ct,
+                                        "total_tokens": tt,
+                                        "estimated": False,
+                                    }
+                                }
+                            ) + "\n"
                         choices = obj.get("choices")
                         if not choices:
                             continue

@@ -65,6 +65,9 @@ def _merge_env_vars(cfg: dict) -> dict[str, str]:
         "KIMI_API_BASE_URL",
         "KIMI_CHAT_MODEL",
         "KIMI_VISION_MODEL",
+        "ADMIN_USERNAMES",
+        "LLM_PRICE_INPUT_CNY_PER_1M",
+        "LLM_PRICE_OUTPUT_CNY_PER_1M",
     ):
         val = _read_dotenv().get(key, "").strip()
         if val and key not in env:

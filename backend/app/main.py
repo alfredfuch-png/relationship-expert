@@ -10,7 +10,7 @@ from typing import Any, Literal, TypeVar
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
@@ -19,6 +19,7 @@ from app.auth import (
     auth_mode,
     authenticate_login,
     clear_session_cookie,
+    CurrentAdminUser,
     CurrentUserId,
     registration_enabled,
     resolve_user,
@@ -47,11 +48,16 @@ from app.startup import prepare_runtime_data
 from app.users_db_sync import r2_sync_configured, schedule_users_db_sync, sync_secret, sync_users_db_to_r2
 from app.users_store import (
     RegistrationInviteLimitError,
+    admin_list_users,
+    admin_overview,
+    admin_user_detail,
+    admin_user_usage,
     clear_user_memory,
     consume_registration_slot,
     create_user,
     load_chat_state,
     load_user_memory,
+    record_usage_event,
     registration_slots_remaining,
     release_registration_slot,
     save_chat_state,
@@ -154,6 +160,7 @@ def auth_status(request: Request) -> dict:
         "authenticated": user is not None if enabled else True,
         "auth_mode": mode,
         "username": user.username if user else None,
+        "is_admin": bool(user.is_admin) if user else False,
         "server_chat": server_chat_enabled(s),
         "registration_enabled": registration_enabled(s),
         "registration_slots_remaining": registration_slots_remaining(s)
@@ -167,7 +174,7 @@ def auth_login(body: LoginBody, response: Response) -> dict:
     s = get_settings()
     mode = auth_mode(s)
     if not auth_enabled(s):
-        return {"ok": True, "auth_required": False, "auth_mode": "none"}
+        return {"ok": True, "auth_required": False, "auth_mode": "none", "is_admin": False}
     user = authenticate_login(username=body.username, password=body.password, settings=s)
     if not user:
         if mode == "accounts":
@@ -179,6 +186,7 @@ def auth_login(body: LoginBody, response: Response) -> dict:
         "auth_required": True,
         "auth_mode": mode,
         "username": user.username,
+        "is_admin": bool(user.is_admin),
         "server_chat": server_chat_enabled(s),
     }
 
@@ -236,6 +244,7 @@ def auth_register(
         "auth_required": True,
         "auth_mode": auth_mode(s),
         "username": user.username,
+        "is_admin": bool(user.is_admin),
         "server_chat": server_chat_enabled(s),
         "users_backed_up": backed_up,
     }
@@ -254,6 +263,7 @@ def public_config(request: Request, user_id: CurrentUserId) -> dict:  # noqa: AR
         "auth_mode": auth_mode(s),
         "server_chat": server_chat_enabled(s),
         "username": user.username if user else None,
+        "is_admin": bool(user.is_admin) if user else False,
     }
 
 
@@ -302,6 +312,50 @@ def admin_sync_users_db(request: Request) -> dict:
     if not sync_users_db_to_r2(s, force=True):
         raise HTTPException(status_code=500, detail="Sync failed")
     return {"ok": True}
+
+
+def _persist_usage(user_id: str, kind: str, usage: dict, settings) -> None:
+    if not usage:
+        return
+    try:
+        record_usage_event(
+            user_id=user_id,
+            kind=kind,
+            model=str(usage.get("model") or ""),
+            prompt_tokens=int(usage.get("prompt_tokens") or 0),
+            completion_tokens=int(usage.get("completion_tokens") or 0),
+            total_tokens=int(usage.get("total_tokens") or 0) or None,
+            estimated=bool(usage.get("estimated")),
+            settings=settings,
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@app.get("/api/admin/overview")
+def api_admin_overview(_admin: CurrentAdminUser) -> dict:  # noqa: ARG001
+    return admin_overview(get_settings(), days=7)
+
+
+@app.get("/api/admin/users")
+def api_admin_users(_admin: CurrentAdminUser) -> dict:  # noqa: ARG001
+    return {"users": admin_list_users(get_settings())}
+
+
+@app.get("/api/admin/users/{user_id}")
+def api_admin_user_detail(user_id: str, _admin: CurrentAdminUser) -> dict:  # noqa: ARG001
+    detail = admin_user_detail(user_id, get_settings())
+    if not detail:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    return detail
+
+
+@app.get("/api/admin/users/{user_id}/usage")
+def api_admin_user_usage(user_id: str, _admin: CurrentAdminUser, days: int = 30) -> dict:  # noqa: ARG001
+    data = admin_user_usage(user_id, get_settings(), days=max(1, min(days, 90)))
+    if not data:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    return data
 
 
 @app.get("/api/health")
@@ -369,8 +423,9 @@ async def _ndjson_chat_events(
     if await _cancelled():
         return
 
+    phase_usage: dict = {}
     try:
-        phase = await _await_unless_disconnected(
+        decided = await _await_unless_disconnected(
             request,
             decide_phase(
                 settings=s,
@@ -381,10 +436,15 @@ async def _ndjson_chat_events(
                 questions_guide=questions_guide,
             ),
         )
-        if phase is None:
+        if decided is None:
             return
+        phase, phase_usage = decided
     except Exception:  # noqa: BLE001
         phase = "clarify" if len(history) < 2 else "advise"
+        phase_usage = {}
+
+    if account_user and phase_usage:
+        _persist_usage(user_id, "phase", phase_usage, s)
 
     if await _cancelled():
         return
@@ -483,6 +543,7 @@ async def _ndjson_chat_events(
         return
 
     assistant_acc = []
+    chat_usage: dict = {}
     async for line in stream_chat_completion(s, messages, should_stop=_cancelled):
         if await _cancelled():
             return
@@ -490,9 +551,32 @@ async def _ndjson_chat_events(
             obj = json.loads(line)
             if isinstance(obj.get("text"), str):
                 assistant_acc.append(obj["text"])
+            if isinstance(obj.get("usage"), dict):
+                chat_usage = obj["usage"]
+                # Do not forward usage blobs to the browser.
+                continue
         except json.JSONDecodeError:
             pass
         yield line.encode()
+
+    if account_user:
+        if chat_usage:
+            _persist_usage(user_id, "chat", chat_usage, s)
+        elif assistant_acc:
+            approx_out = max(1, len("".join(assistant_acc)) // 2)
+            approx_in = max(1, (len(user_text) + len(context_summary) + len(user_memory)) // 2)
+            _persist_usage(
+                user_id,
+                "chat",
+                {
+                    "model": effective_chat_model(s),
+                    "prompt_tokens": approx_in,
+                    "completion_tokens": approx_out,
+                    "total_tokens": approx_in + approx_out,
+                    "estimated": True,
+                },
+                s,
+            )
 
     if await _cancelled():
         return
@@ -518,7 +602,9 @@ async def _ndjson_chat_events(
             )
             if summarized is None:
                 return
-            new_summary = summarized
+            new_summary, summary_usage = summarized
+            if account_user and summary_usage:
+                _persist_usage(user_id, "summary", summary_usage, s)
         except Exception:  # noqa: BLE001
             new_summary = context_summary
 
@@ -551,8 +637,11 @@ async def _ndjson_chat_events(
             )
             if merged is None:
                 return
-            if merged.strip() and merged.strip() != user_memory.strip():
-                save_user_memory(user_id, merged, s)
+            memory_text, memory_usage = merged
+            if account_user and memory_usage:
+                _persist_usage(user_id, "memory", memory_usage, s)
+            if memory_text.strip() and memory_text.strip() != user_memory.strip():
+                save_user_memory(user_id, memory_text, s)
                 if r2_sync_configured(s):
                     schedule_users_db_sync(s, True)
                 yield (
@@ -615,6 +704,25 @@ async def chat(body: ChatBody, request: Request, user_id: CurrentUserId) -> Stre
         _ndjson_chat_events(body, request, user_id),
         media_type="application/x-ndjson",
     )
+
+
+def _admin_index() -> FileResponse:
+    index = _web_dist() / "index.html"
+    if not index.is_file():
+        raise HTTPException(status_code=404, detail="Frontend not built.")
+    return FileResponse(index)
+
+
+@app.get("/admin")
+@app.get("/admin/")
+def admin_spa() -> FileResponse:
+    """Serve SPA shell for the ops dashboard (refresh-safe)."""
+    return _admin_index()
+
+
+@app.get("/admin/{path:path}")
+def admin_spa_nested(path: str) -> FileResponse:  # noqa: ARG001
+    return _admin_index()
 
 
 _dist = _web_dist()

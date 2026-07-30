@@ -134,9 +134,11 @@ async def _chat_json(
     messages: list[dict[str, Any]],
     *,
     max_tokens: int = 400,
-) -> str:
+) -> tuple[str, dict[str, Any]]:
+    """Return (content, usage_info). usage_info may be empty."""
     from app.chat import effective_chat_model, uses_kimi_chat
 
+    empty_usage: dict[str, Any] = {}
     if uses_kimi_chat(settings):
         token = settings.kimi_api_key.strip()
         base = settings.kimi_api_base_url.rstrip("/") or "https://api.moonshot.cn/v1"
@@ -148,7 +150,7 @@ async def _chat_json(
         model = settings.ai_chat_model
         extra = {"temperature": 0.1}
     if not token:
-        return ""
+        return "", empty_usage
 
     url = f"{base}/chat/completions"
     payload = {
@@ -168,7 +170,7 @@ async def _chat_json(
             json=payload,
         )
         if resp.status_code >= 400:
-            return ""
+            return "", empty_usage
         data = resp.json()
         msg = (data.get("choices") or [{}])[0].get("message") or {}
         content = msg.get("content") or ""
@@ -176,7 +178,34 @@ async def _chat_json(
             content = "".join(
                 p.get("text", "") if isinstance(p, dict) else str(p) for p in content
             )
-        return str(content).strip()
+        usage_raw = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        text = str(content).strip()
+        if usage_raw:
+            usage = {
+                "model": model,
+                "prompt_tokens": int(usage_raw.get("prompt_tokens") or 0),
+                "completion_tokens": int(usage_raw.get("completion_tokens") or 0),
+                "total_tokens": int(
+                    usage_raw.get("total_tokens")
+                    or (
+                        int(usage_raw.get("prompt_tokens") or 0)
+                        + int(usage_raw.get("completion_tokens") or 0)
+                    )
+                ),
+                "estimated": False,
+            }
+        else:
+            # Rough char-based fallback when provider omits usage.
+            approx_out = max(1, len(text) // 2) if text else 0
+            approx_in = max(1, sum(len(str(m.get("content") or "")) for m in messages) // 2)
+            usage = {
+                "model": model,
+                "prompt_tokens": approx_in,
+                "completion_tokens": approx_out,
+                "total_tokens": approx_in + approx_out,
+                "estimated": True,
+            }
+        return text, usage
 
 
 async def decide_phase(
@@ -187,7 +216,7 @@ async def decide_phase(
     context_summary: str,
     has_images: bool,
     questions_guide: str,
-) -> Phase:
+) -> tuple[Phase, dict[str, Any]]:
     user_turns = sum(1 for m in history if m.get("role") == "user")
 
     hist_snip = []
@@ -213,7 +242,7 @@ async def decide_phase(
         f"本轮是否附带截图：{'是' if has_images else '否'}\n"
         f"用户是否要求跳过追问：{'是' if wants_skip_clarify(user_message) else '否'}\n"
     )
-    raw = await _chat_json(
+    raw, usage = await _chat_json(
         settings,
         [
             {
@@ -227,17 +256,17 @@ async def decide_phase(
     phase = _parse_phase_json(raw)
     if phase:
         if phase != "out_of_scope" and wants_skip_clarify(user_message):
-            return "advise"
-        return phase
+            return "advise", usage
+        return phase, usage
 
     # Heuristic fallback
     if user_turns == 0 and not context_summary.strip() and len(user_message.strip()) < 80:
-        return "clarify"
+        return "clarify", usage
     if wants_skip_clarify(user_message):
-        return "advise"
+        return "advise", usage
     if user_turns >= 4 or (context_summary.strip() and user_turns >= 2):
-        return "advise"
-    return "clarify"
+        return "advise", usage
+    return "clarify", usage
 
 
 def _looks_sparse(text: str) -> bool:
@@ -274,7 +303,7 @@ async def refresh_context_summary(
     history: list[dict[str, str]],
     latest_user: str,
     latest_assistant: str,
-) -> str:
+) -> tuple[str, dict[str, Any]]:
     """Compress conversation into a structured Chinese summary."""
     hist_lines = []
     for m in history[-12:]:
@@ -288,7 +317,7 @@ async def refresh_context_summary(
         f"最新用户：{latest_user[:1200]}\n"
         f"最新助手：{latest_assistant[:2000]}\n"
     )
-    out = await _chat_json(
+    out, usage = await _chat_json(
         settings,
         [
             {"role": "system", "content": "你是咨询上下文压缩助手。只输出摘要。"},
@@ -296,7 +325,7 @@ async def refresh_context_summary(
         ],
         max_tokens=600,
     )
-    return out or previous_summary.strip()
+    return (out or previous_summary.strip()), usage
 
 
 async def refresh_user_memory(
@@ -307,7 +336,7 @@ async def refresh_user_memory(
     latest_assistant: str,
     thread_summary: str = "",
     phase: str = "advise",
-) -> str:
+) -> tuple[str, dict[str, Any]]:
     """Merge this turn into a durable cross-thread user memory (Chinese)."""
     prompt = (
         "你在维护用户的「跨对话长时记忆」，供亲密关系顾问在不同聊天窗口复用。\n"
@@ -323,7 +352,7 @@ async def refresh_user_memory(
         f"最新用户：{latest_user[:1500]}\n"
         f"最新助手：{latest_assistant[:2000]}\n"
     )
-    out = await _chat_json(
+    out, usage = await _chat_json(
         settings,
         [
             {"role": "system", "content": "你是用户长时记忆压缩助手。只输出记忆正文。"},
@@ -334,7 +363,7 @@ async def refresh_user_memory(
     text = (out or previous_memory).strip()
     if len(text) > 12000:
         text = text[:12000]
-    return text
+    return text, usage
 
 
 def should_update_user_memory(*, phase: str, user_text: str, assistant_text: str) -> bool:

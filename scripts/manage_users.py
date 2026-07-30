@@ -11,7 +11,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 
 from app.settings import get_settings
-from app.users_store import create_user, delete_user, init_db, list_users
+from app.users_store import (
+    create_user,
+    delete_user,
+    init_db,
+    list_users,
+    set_user_admin,
+)
 
 
 def main() -> None:
@@ -26,6 +32,12 @@ def main() -> None:
 
     rm_p = sub.add_parser("remove", help="Delete a user")
     rm_p.add_argument("username")
+
+    promote_p = sub.add_parser("promote", help="Grant admin dashboard access")
+    promote_p.add_argument("username")
+
+    demote_p = sub.add_parser("demote", help="Revoke admin dashboard access")
+    demote_p.add_argument("username")
 
     args = parser.parse_args()
     init_db(get_settings())
@@ -43,6 +55,18 @@ def main() -> None:
     elif args.cmd == "remove":
         if delete_user(args.username):
             print(f"Removed user '{args.username}'")
+        else:
+            print(f"User not found: {args.username}", file=sys.stderr)
+            sys.exit(1)
+    elif args.cmd == "promote":
+        if set_user_admin(args.username, True):
+            print(f"Promoted '{args.username}' to admin")
+        else:
+            print(f"User not found: {args.username}", file=sys.stderr)
+            sys.exit(1)
+    elif args.cmd == "demote":
+        if set_user_admin(args.username, False):
+            print(f"Demoted '{args.username}' (no longer admin)")
         else:
             print(f"User not found: {args.username}", file=sys.stderr)
             sys.exit(1)

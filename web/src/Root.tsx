@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import App from './App.tsx'
+import Admin from './Admin.tsx'
 import Login from './Login.tsx'
 import './Login.css'
 
@@ -7,6 +8,9 @@ export default function Root() {
   const [checking, setChecking] = useState(true)
   const [authRequired, setAuthRequired] = useState(false)
   const [authenticated, setAuthenticated] = useState(false)
+  const isAdminPath =
+    typeof window !== 'undefined' &&
+    (window.location.pathname === '/admin' || window.location.pathname.startsWith('/admin/'))
 
   useEffect(() => {
     let cancelled = false
@@ -42,6 +46,10 @@ export default function Root() {
 
   if (authRequired && !authenticated) {
     return <Login onSuccess={() => setAuthenticated(true)} />
+  }
+
+  if (isAdminPath) {
+    return <Admin />
   }
 
   return <App />

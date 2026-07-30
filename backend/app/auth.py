@@ -185,4 +185,17 @@ def require_user_id(request: Request) -> str:
     return user_id
 
 
+def require_admin_user(request: Request) -> User:
+    settings = get_settings()
+    if not auth_enabled(settings):
+        raise HTTPException(status_code=403, detail="需要管理员登录。")
+    user = resolve_user(request, settings)
+    if not user or user.id in ("anonymous", "shared"):
+        raise HTTPException(status_code=401, detail="请先登录。")
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="需要管理员权限。")
+    return user
+
+
 CurrentUserId = Annotated[str, Depends(require_user_id)]
+CurrentAdminUser = Annotated[User, Depends(require_admin_user)]

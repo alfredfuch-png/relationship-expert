@@ -147,6 +147,7 @@ type AppConfig = {
   auth_mode?: 'none' | 'shared_password' | 'accounts'
   server_chat?: boolean
   username?: string | null
+  is_admin?: boolean
 }
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -155,6 +156,7 @@ const DEFAULT_CONFIG: AppConfig = {
   show_routing: true,
   allow_index: true,
   server_chat: false,
+  is_admin: false,
 }
 
 const MAX_IMAGES = 3
@@ -907,6 +909,17 @@ export default function App() {
               onClick={() => void openMemoryPanel()}
             >
               我的记忆
+            </button>
+          ) : null}
+          {appConfig.is_admin ? (
+            <button
+              type="button"
+              className="btn secondary logout-btn"
+              onClick={() => {
+                window.location.href = '/admin'
+              }}
+            >
+              运营后台
             </button>
           ) : null}
           {appConfig.auth_required ? (

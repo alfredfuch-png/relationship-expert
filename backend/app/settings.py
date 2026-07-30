@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     allow_registration: bool = False
     registration_invite_code: str = ""
     registration_invite_max_uses: int = 30
+    # Comma-separated usernames promoted to admin on startup (ops dashboard).
+    admin_usernames: str = ""
+    # Estimated CNY cost per 1M tokens (Moonshot China kimi-k3 list price defaults).
+    llm_price_input_cny_per_1m: float = 20.0
+    llm_price_output_cny_per_1m: float = 100.0
 
     ai_builder_token: str = ""
     ai_api_base_url: str = "https://space.ai-builders.com/backend/v1"

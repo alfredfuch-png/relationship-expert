@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 from app.indexing import read_index_meta
 from app.settings import Settings, get_settings
 from app.users_db_sync import restore_users_db_from_r2, r2_sync_configured
-from app.users_store import bootstrap_users, has_users, init_db, users_db_path
+from app.users_store import apply_admin_usernames, bootstrap_users, has_users, init_db, users_db_path
 
 
 def _fetch_url(url: str, settings: Settings, *, timeout: int = 120) -> bytes:
@@ -139,3 +139,4 @@ def prepare_runtime_data(settings: Settings | None = None) -> None:
     ensure_index_bundle(settings)
     ensure_users_db(settings)
     bootstrap_accounts(settings)
+    apply_admin_usernames(settings)

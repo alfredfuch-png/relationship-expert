@@ -1,0 +1,246 @@
+.admin-page {
+  min-height: 100vh;
+  padding: 1.25rem 1.5rem 2.5rem;
+  background: linear-gradient(160deg, #f7f3ec 0%, #eef2f4 45%, #f4efe8 100%);
+  color: #1f2a2e;
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+.admin-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.admin-header h1 {
+  margin: 0 0 0.25rem;
+  font-size: 1.6rem;
+  font-weight: 650;
+}
+
+.admin-link {
+  color: #1a5f5a;
+  text-decoration: none;
+  font-weight: 600;
+  padding: 0.4rem 0.75rem;
+  border: 1px solid rgba(26, 95, 90, 0.25);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.admin-link:hover {
+  background: #fff;
+}
+
+.admin-err {
+  color: #9b1c1c;
+  background: #fde8e8;
+  padding: 0.6rem 0.8rem;
+  border-radius: 8px;
+}
+
+.admin-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.admin-card {
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(31, 42, 46, 0.08);
+  border-radius: 12px;
+  padding: 0.85rem 1rem;
+}
+
+.admin-card .label {
+  font-size: 0.78rem;
+  color: #5c6b70;
+  margin-bottom: 0.35rem;
+}
+
+.admin-card .value {
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.admin-note {
+  margin: 0 0 1rem;
+}
+
+.admin-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.admin-panel {
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(31, 42, 46, 0.08);
+  border-radius: 14px;
+  padding: 1rem;
+  min-height: 320px;
+}
+
+.admin-panel h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1.05rem;
+}
+
+.admin-panel h3 {
+  margin: 1rem 0 0.5rem;
+  font-size: 0.95rem;
+}
+
+.admin-table-wrap {
+  overflow: auto;
+  max-height: 70vh;
+}
+
+.admin-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.86rem;
+}
+
+.admin-table th,
+.admin-table td {
+  text-align: left;
+  padding: 0.45rem 0.4rem;
+  border-bottom: 1px solid rgba(31, 42, 46, 0.08);
+  white-space: nowrap;
+}
+
+.admin-table tbody tr {
+  cursor: pointer;
+}
+
+.admin-table tbody tr:hover,
+.admin-table tbody tr.active {
+  background: rgba(26, 95, 90, 0.08);
+}
+
+.admin-badge {
+  margin-left: 0.35rem;
+  font-size: 0.7rem;
+  color: #1a5f5a;
+  border: 1px solid rgba(26, 95, 90, 0.35);
+  border-radius: 999px;
+  padding: 0.05rem 0.4rem;
+}
+
+.admin-detail-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: baseline;
+  margin-bottom: 0.5rem;
+}
+
+.admin-detail-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  font-size: 0.88rem;
+  margin-bottom: 0.35rem;
+}
+
+.admin-kind-list {
+  margin: 0.25rem 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.82rem;
+  color: #445055;
+}
+
+.admin-threads {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-height: 55vh;
+  overflow: auto;
+}
+
+.admin-thread {
+  border: 1px solid rgba(31, 42, 46, 0.1);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.admin-thread-toggle {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.55rem 0.7rem;
+  border: 0;
+  background: rgba(247, 243, 236, 0.8);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+
+.admin-msgs {
+  padding: 0.6rem 0.7rem 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  background: #fff;
+}
+
+.admin-msg pre {
+  margin: 0.2rem 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.admin-msg-meta {
+  font-size: 0.75rem;
+  color: #5c6b70;
+}
+
+.admin-msg.user {
+  padding-left: 0.4rem;
+  border-left: 3px solid #c4a574;
+}
+
+.admin-msg.assistant {
+  padding-left: 0.4rem;
+  border-left: 3px solid #1a5f5a;
+}
+
+.admin-memory {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  font-size: 0.84rem;
+  background: #f8f6f1;
+  border-radius: 8px;
+  padding: 0.7rem;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.muted {
+  color: #5c6b70;
+}
+
+.small {
+  font-size: 0.82rem;
+}
+
+@media (max-width: 960px) {
+  .admin-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-page {
+    padding: 1rem;
+  }
+}
