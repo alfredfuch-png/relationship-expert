@@ -5,12 +5,14 @@ import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import bcrypt
 
 from app.settings import Settings, get_settings
+
+BEIJING_TZ = timezone(timedelta(hours=8))
 
 
 class RegistrationInviteLimitError(Exception):
@@ -623,6 +625,73 @@ def admin_list_users(settings: Settings | None = None) -> list[dict]:
         conn.close()
 
 
+def _beijing_period_starts() -> tuple[str, str]:
+    """Return (today_start_utc_iso, month_start_utc_iso) for Asia/Shanghai calendar."""
+    now_bj = datetime.now(BEIJING_TZ)
+    day_start = now_bj.replace(hour=0, minute=0, second=0, microsecond=0)
+    month_start = now_bj.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    return (
+        day_start.astimezone(UTC).isoformat(),
+        month_start.astimezone(UTC).isoformat(),
+    )
+
+
+def _usage_bucket(
+    conn: sqlite3.Connection,
+    user_id: str,
+    *,
+    since_iso: str | None = None,
+    with_kind: bool = False,
+) -> dict:
+    where = "WHERE user_id = ?"
+    params: list[object] = [user_id]
+    if since_iso:
+        where += " AND created_at >= ?"
+        params.append(since_iso)
+    usage = conn.execute(
+        f"""
+        SELECT
+            COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
+            COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
+            COALESCE(SUM(total_tokens), 0) AS total_tokens,
+            COALESCE(SUM(cost_cny), 0) AS cost_cny,
+            COUNT(*) AS events
+        FROM usage_events {where}
+        """,
+        params,
+    ).fetchone()
+    out: dict = {
+        "prompt_tokens": int(usage["prompt_tokens"] or 0),
+        "completion_tokens": int(usage["completion_tokens"] or 0),
+        "total_tokens": int(usage["total_tokens"] or 0),
+        "cost_cny_total": round(float(usage["cost_cny"] or 0), 4),
+        "events": int(usage["events"] or 0),
+    }
+    if with_kind:
+        by_kind = conn.execute(
+            f"""
+            SELECT kind,
+                   SUM(total_tokens) AS tokens,
+                   SUM(cost_cny) AS cost,
+                   COUNT(*) AS events
+            FROM usage_events {where}
+            GROUP BY kind
+            ORDER BY tokens DESC
+            """,
+            params,
+        ).fetchall()
+        out["by_kind"] = [
+            {
+                "kind": str(k["kind"]),
+                "tokens": int(k["tokens"] or 0),
+                "cost_cny": round(float(k["cost"] or 0), 4),
+                "events": int(k["events"] or 0),
+            }
+            for k in by_kind
+        ]
+    return out
+
+
 def admin_user_detail(user_id: str, settings: Settings | None = None) -> dict | None:
     settings = settings or get_settings()
     init_db(settings)
@@ -649,30 +718,10 @@ def admin_user_detail(user_id: str, settings: Settings | None = None) -> dict | 
             except json.JSONDecodeError:
                 pass
         threads, messages, latest_msg = _chat_stats_from_state(state)
-        usage = conn.execute(
-            """
-            SELECT
-                COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,
-                COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
-                COALESCE(SUM(total_tokens), 0) AS total_tokens,
-                COALESCE(SUM(cost_cny), 0) AS cost_cny,
-                COUNT(*) AS events
-            FROM usage_events WHERE user_id = ?
-            """,
-            (user_id,),
-        ).fetchone()
-        by_kind = conn.execute(
-            """
-            SELECT kind,
-                   SUM(total_tokens) AS tokens,
-                   SUM(cost_cny) AS cost,
-                   COUNT(*) AS events
-            FROM usage_events WHERE user_id = ?
-            GROUP BY kind
-            ORDER BY tokens DESC
-            """,
-            (user_id,),
-        ).fetchall()
+        today_start, month_start = _beijing_period_starts()
+        usage_today = _usage_bucket(conn, user_id, since_iso=today_start)
+        usage_month = _usage_bucket(conn, user_id, since_iso=month_start)
+        usage_total = _usage_bucket(conn, user_id, with_kind=True)
         memory_row = conn.execute(
             "SELECT memory_text, updated_at FROM user_memory WHERE user_id = ?",
             (user_id,),
@@ -691,22 +740,12 @@ def admin_user_detail(user_id: str, settings: Settings | None = None) -> dict | 
             "memory_text": str(memory_row["memory_text"]) if memory_row else "",
             "memory_updated_at": str(memory_row["updated_at"]) if memory_row else None,
             "usage": {
-                "prompt_tokens": int(usage["prompt_tokens"] or 0),
-                "completion_tokens": int(usage["completion_tokens"] or 0),
-                "total_tokens": int(usage["total_tokens"] or 0),
-                "cost_cny_total": round(float(usage["cost_cny"] or 0), 4),
-                "events": int(usage["events"] or 0),
-                "by_kind": [
-                    {
-                        "kind": str(k["kind"]),
-                        "tokens": int(k["tokens"] or 0),
-                        "cost_cny": round(float(k["cost"] or 0), 4),
-                        "events": int(k["events"] or 0),
-                    }
-                    for k in by_kind
-                ],
+                "timezone": "Asia/Shanghai",
+                "today": usage_today,
+                "month": usage_month,
+                "total": usage_total,
             },
-            "cost_note": "费用为按官方单价估算（输入按 cache miss），非账单原件",
+            "cost_note": "费用为按官方单价估算（输入按 cache miss），非账单原件；今日/本月按北京时间",
         }
     finally:
         conn.close()

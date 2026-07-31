@@ -44,16 +44,23 @@ type ChatThread = {
   messages?: ChatMessage[]
 }
 
+type UsageSummary = {
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  cost_cny_total: number
+  events: number
+  by_kind?: { kind: string; tokens: number; cost_cny: number; events: number }[]
+}
+
 type UserDetail = UserRow & {
   chat_state: { threads?: ChatThread[]; active_id?: string | null }
   memory_text?: string
   usage: {
-    prompt_tokens: number
-    completion_tokens: number
-    total_tokens: number
-    cost_cny_total: number
-    events: number
-    by_kind: { kind: string; tokens: number; cost_cny: number; events: number }[]
+    timezone?: string
+    today: UsageSummary
+    month: UsageSummary
+    total: UsageSummary
   }
   cost_note?: string
 }
@@ -71,6 +78,42 @@ function fmtTime(raw: string | null | undefined): string {
   const d = new Date(raw)
   if (Number.isNaN(d.getTime())) return raw
   return d.toLocaleString()
+}
+
+function UsageBlock({
+  title,
+  summary,
+  showKind,
+}: {
+  title: string
+  summary: UsageSummary
+  showKind?: boolean
+}) {
+  return (
+    <div className="admin-usage-block">
+      <h3>{title}</h3>
+      <div className="admin-detail-stats">
+        <span>Token {fmtTokens(summary.total_tokens)}</span>
+        <span>
+          输入/输出 {fmtTokens(summary.prompt_tokens)} / {fmtTokens(summary.completion_tokens)}
+        </span>
+        <span>费用 {fmtMoney(summary.cost_cny_total)}</span>
+      </div>
+      {showKind ? (
+        summary.by_kind && summary.by_kind.length > 0 ? (
+          <ul className="admin-kind-list">
+            {summary.by_kind.map((k) => (
+              <li key={k.kind}>
+                {k.kind}：{fmtTokens(k.tokens)} · {fmtMoney(k.cost_cny)}（{k.events} 次）
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="muted small">尚无 token 记录</p>
+        )
+      ) : null}
+    </div>
+  )
 }
 
 export default function Admin() {
@@ -292,25 +335,14 @@ export default function Admin() {
                 <strong>{detail.username}</strong>
                 <span className="muted small">注册 {fmtTime(detail.created_at)}</span>
               </div>
-              <div className="admin-detail-stats">
-                <span>Token {fmtTokens(detail.usage.total_tokens)}</span>
-                <span>费用 {fmtMoney(detail.usage.cost_cny_total)}</span>
-                <span>
-                  输入/输出 {fmtTokens(detail.usage.prompt_tokens)} /{' '}
-                  {fmtTokens(detail.usage.completion_tokens)}
-                </span>
+              <div className="admin-usage-sections">
+                <UsageBlock title="今日消费" summary={detail.usage.today} />
+                <UsageBlock title="本月消费" summary={detail.usage.month} />
+                <UsageBlock title="总消费" summary={detail.usage.total} showKind />
               </div>
-              {detail.usage.by_kind.length > 0 ? (
-                <ul className="admin-kind-list">
-                  {detail.usage.by_kind.map((k) => (
-                    <li key={k.kind}>
-                      {k.kind}：{fmtTokens(k.tokens)} · {fmtMoney(k.cost_cny)}（{k.events} 次）
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <p className="muted small">尚无 token 记录（上线埋点后才会累计）</p>
-              )}
+              {detail.cost_note ? (
+                <p className="muted small admin-note">{detail.cost_note}</p>
+              ) : null}
 
               <h3>对话线程</h3>
               {(detail.chat_state.threads || []).length === 0 ? (
