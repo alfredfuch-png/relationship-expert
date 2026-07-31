@@ -111,9 +111,13 @@ def main() -> None:
         try:
             print(out)
         except UnicodeEncodeError:
-            print(out.encode("utf-8", errors="replace").decode("utf-8"))
+            sys.stdout.buffer.write((out + "\n").encode("utf-8", errors="replace"))
     except json.JSONDecodeError:
-        print(resp.text[:2000])
+        text = resp.text[:2000]
+        try:
+            print(text)
+        except UnicodeEncodeError:
+            sys.stdout.buffer.write((text + "\n").encode("utf-8", errors="replace"))
     if resp.status_code >= 400:
         sys.exit(1)
     url = f"https://{cfg['service_name']}.ai-builders.space"
