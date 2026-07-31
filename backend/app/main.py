@@ -48,6 +48,7 @@ from app.startup import prepare_runtime_data
 from app.users_db_sync import r2_sync_configured, schedule_users_db_sync, sync_secret, sync_users_db_to_r2
 from app.users_store import (
     RegistrationInviteLimitError,
+    TOKEN_QUOTA_EXCEEDED_MESSAGE,
     admin_list_users,
     admin_overview,
     admin_user_detail,
@@ -55,6 +56,7 @@ from app.users_store import (
     clear_user_memory,
     consume_registration_slot,
     create_user,
+    get_token_quota,
     load_chat_state,
     load_user_memory,
     record_usage_event,
@@ -419,6 +421,18 @@ async def _ndjson_chat_events(
     questions_guide = load_questions_guide()
     account_user = user_id not in ("anonymous", "shared")
     user_memory = load_user_memory(user_id, s) if account_user else ""
+
+    if account_user:
+        quota = get_token_quota(user_id, s)
+        if not quota.get("allowed", True):
+            yield (
+                json.dumps(
+                    {"error": quota.get("message") or TOKEN_QUOTA_EXCEEDED_MESSAGE},
+                    ensure_ascii=False,
+                )
+                + "\n"
+            ).encode()
+            return
 
     if await _cancelled():
         return

@@ -343,6 +343,108 @@ def is_user_admin(user_id: str, settings: Settings | None = None) -> bool:
     return bool(user and user.is_admin)
 
 
+TOKEN_QUOTA_EXCEEDED_MESSAGE = "您的对话额度已用完。"
+
+
+def _parse_created_at_beijing(created_at: str) -> datetime:
+    raw = (created_at or "").strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        dt = datetime.now(UTC)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(BEIJING_TZ)
+
+
+def _months_inclusive_beijing(start_bj: datetime, end_bj: datetime) -> int:
+    months = (end_bj.year - start_bj.year) * 12 + (end_bj.month - start_bj.month) + 1
+    return max(1, months)
+
+
+def get_token_quota(user_id: str, settings: Settings | None = None) -> dict:
+    """
+    Monthly grant accrues and unused balance carries forward.
+
+    granted = months_since_registration_month * monthly_allowance
+    remaining = granted - lifetime_tokens_used
+    """
+    settings = settings or get_settings()
+    allowance = max(0, int(settings.token_monthly_allowance))
+    if not user_id or user_id in ("anonymous", "shared"):
+        return {
+            "allowed": True,
+            "unlimited": True,
+            "monthly_allowance": allowance,
+            "months_granted": 0,
+            "granted_tokens": 0,
+            "used_tokens": 0,
+            "remaining_tokens": 0,
+            "message": "",
+        }
+    user = get_user_by_id(user_id, settings)
+    if not user:
+        return {
+            "allowed": False,
+            "unlimited": False,
+            "monthly_allowance": allowance,
+            "months_granted": 0,
+            "granted_tokens": 0,
+            "used_tokens": 0,
+            "remaining_tokens": 0,
+            "message": TOKEN_QUOTA_EXCEEDED_MESSAGE,
+        }
+    if user.is_admin:
+        return {
+            "allowed": True,
+            "unlimited": True,
+            "monthly_allowance": allowance,
+            "months_granted": 0,
+            "granted_tokens": 0,
+            "used_tokens": 0,
+            "remaining_tokens": 0,
+            "message": "",
+        }
+
+    init_db(settings)
+    conn = _connect(settings)
+    try:
+        row = conn.execute(
+            "SELECT created_at FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        created = str(row["created_at"]) if row else _utc_now()
+        used_row = conn.execute(
+            """
+            SELECT COALESCE(SUM(total_tokens), 0) AS tokens
+            FROM usage_events WHERE user_id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+        used = int(used_row["tokens"] or 0)
+    finally:
+        conn.close()
+
+    start_bj = _parse_created_at_beijing(created)
+    now_bj = datetime.now(BEIJING_TZ)
+    months = _months_inclusive_beijing(start_bj, now_bj)
+    granted = months * allowance
+    remaining = granted - used
+    allowed = remaining > 0
+    return {
+        "allowed": allowed,
+        "unlimited": False,
+        "monthly_allowance": allowance,
+        "months_granted": months,
+        "granted_tokens": granted,
+        "used_tokens": used,
+        "remaining_tokens": max(0, remaining),
+        "message": "" if allowed else TOKEN_QUOTA_EXCEEDED_MESSAGE,
+    }
+
+
 def bootstrap_users(spec: str, settings: Settings | None = None) -> int:
     """spec: 'user:pass,user2:pass2' — only creates users when table is empty."""
     if has_users(settings):
@@ -787,7 +889,7 @@ def admin_user_detail(user_id: str, settings: Settings | None = None) -> dict | 
             "SELECT memory_text, updated_at FROM user_memory WHERE user_id = ?",
             (user_id,),
         ).fetchone()
-        return {
+        detail = {
             "id": str(row["id"]),
             "username": str(row["username"]),
             "created_at": str(row["created_at"]),
@@ -810,6 +912,8 @@ def admin_user_detail(user_id: str, settings: Settings | None = None) -> dict | 
         }
     finally:
         conn.close()
+    detail["token_quota"] = get_token_quota(user_id, settings)
+    return detail
 
 
 def admin_user_usage(

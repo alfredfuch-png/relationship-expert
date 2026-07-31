@@ -68,6 +68,7 @@ def _merge_env_vars(cfg: dict) -> dict[str, str]:
         "ADMIN_USERNAMES",
         "LLM_PRICE_INPUT_CNY_PER_1M",
         "LLM_PRICE_OUTPUT_CNY_PER_1M",
+        "TOKEN_MONTHLY_ALLOWANCE",
     ):
         val = _read_dotenv().get(key, "").strip()
         if val and key not in env:

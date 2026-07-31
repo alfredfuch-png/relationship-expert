@@ -59,6 +59,8 @@ class Settings(BaseSettings):
     # Estimated CNY cost per 1M tokens (Moonshot China kimi-k3 list price defaults).
     llm_price_input_cny_per_1m: float = 20.0
     llm_price_output_cny_per_1m: float = 100.0
+    # Monthly token grant per fan account; unused balance carries to later months.
+    token_monthly_allowance: int = 3_000_000
 
     ai_builder_token: str = ""
     ai_api_base_url: str = "https://space.ai-builders.com/backend/v1"

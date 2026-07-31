@@ -65,6 +65,16 @@ type UserDetail = UserRow & {
     month: UsageSummary
     total: UsageSummary
   }
+  token_quota?: {
+    allowed: boolean
+    unlimited: boolean
+    monthly_allowance: number
+    months_granted: number
+    granted_tokens: number
+    used_tokens: number
+    remaining_tokens: number
+    message: string
+  }
   cost_note?: string
 }
 
@@ -354,6 +364,27 @@ export default function Admin() {
                 <strong>{detail.username}</strong>
                 <span className="muted small">注册 {fmtTime(detail.created_at)}</span>
               </div>
+              {detail.token_quota ? (
+                <div className="admin-usage-block">
+                  <h3>对话额度</h3>
+                  {detail.token_quota.unlimited ? (
+                    <p className="muted small">管理员：不限额度</p>
+                  ) : (
+                    <div className="admin-detail-stats">
+                      <span>剩余 {fmtTokens(detail.token_quota.remaining_tokens)}</span>
+                      <span>已用 {fmtTokens(detail.token_quota.used_tokens)}</span>
+                      <span>累计发放 {fmtTokens(detail.token_quota.granted_tokens)}</span>
+                      <span>
+                        月额度 {fmtTokens(detail.token_quota.monthly_allowance)} ×{' '}
+                        {detail.token_quota.months_granted} 月
+                      </span>
+                    </div>
+                  )}
+                  {!detail.token_quota.allowed ? (
+                    <p className="admin-err">{detail.token_quota.message || '额度已用完'}</p>
+                  ) : null}
+                </div>
+              ) : null}
               <div className="admin-usage-sections">
                 <UsageBlock title="今日消费" summary={detail.usage.today} />
                 <UsageBlock title="本月消费" summary={detail.usage.month} />
