@@ -334,7 +334,7 @@ def _persist_usage(user_id: str, kind: str, usage: dict, settings) -> None:
 
 @app.get("/api/admin/overview")
 def api_admin_overview(_admin: CurrentAdminUser) -> dict:  # noqa: ARG001
-    return admin_overview(get_settings(), days=7)
+    return admin_overview(get_settings())
 
 
 @app.get("/api/admin/users")

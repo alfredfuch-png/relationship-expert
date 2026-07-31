@@ -523,48 +523,109 @@ def _chat_stats_from_state(state: dict | None) -> tuple[int, int, str | None]:
     return len(threads), msg_count, latest_s
 
 
-def admin_overview(settings: Settings | None = None, *, days: int = 7) -> dict:
+def _beijing_day_bounds() -> tuple[datetime, datetime, datetime]:
+    """Return (yesterday_start, today_start, now) in Beijing tz."""
+    now_bj = datetime.now(BEIJING_TZ)
+    today_start = now_bj.replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday_start = today_start - timedelta(days=1)
+    return yesterday_start, today_start, now_bj
+
+
+def _to_utc_iso(dt: datetime) -> str:
+    return dt.astimezone(UTC).isoformat()
+
+
+def admin_overview(settings: Settings | None = None) -> dict:
+    """Ops overview: registered users, chat-active fans, tokens/cost, invite slots."""
     settings = settings or get_settings()
     init_db(settings)
-    since = datetime.now(UTC).timestamp() - max(1, days) * 86400
-    since_iso = datetime.fromtimestamp(since, tz=UTC).isoformat()
+    yesterday_start, today_start, now_bj = _beijing_day_bounds()
+    start_7 = today_start - timedelta(days=6)
+    start_30 = today_start - timedelta(days=29)
+    y_start = _to_utc_iso(yesterday_start)
+    y_end = _to_utc_iso(today_start)
+    s7 = _to_utc_iso(start_7)
+    s30 = _to_utc_iso(start_30)
+    now_iso = _to_utc_iso(now_bj.astimezone(UTC) if now_bj.tzinfo else now_bj)
+
     conn = _connect(settings)
     try:
         user_count = int(conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"])
-        usage = conn.execute(
-            """
-            SELECT
-                COALESCE(SUM(total_tokens), 0) AS tokens,
-                COALESCE(SUM(cost_cny), 0) AS cost,
-                COUNT(DISTINCT user_id) AS active_users,
-                COUNT(*) AS events
-            FROM usage_events
-            WHERE created_at >= ?
-            """,
-            (since_iso,),
-        ).fetchone()
-        chat_active = conn.execute(
-            """
-            SELECT COUNT(*) AS c FROM user_chat_state WHERE updated_at >= ?
-            """,
-            (since_iso,),
-        ).fetchone()
+
+        def _chat_active(since_iso: str, until_iso: str | None = None) -> int:
+            if until_iso:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(DISTINCT user_id) AS c
+                    FROM usage_events
+                    WHERE kind = 'chat' AND created_at >= ? AND created_at < ?
+                    """,
+                    (since_iso, until_iso),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(DISTINCT user_id) AS c
+                    FROM usage_events
+                    WHERE kind = 'chat' AND created_at >= ?
+                    """,
+                    (since_iso,),
+                ).fetchone()
+            return int(row["c"] or 0)
+
+        def _token_cost(since_iso: str, until_iso: str | None = None) -> tuple[int, float]:
+            if until_iso:
+                row = conn.execute(
+                    """
+                    SELECT
+                        COALESCE(SUM(total_tokens), 0) AS tokens,
+                        COALESCE(SUM(cost_cny), 0) AS cost
+                    FROM usage_events
+                    WHERE created_at >= ? AND created_at < ?
+                    """,
+                    (since_iso, until_iso),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT
+                        COALESCE(SUM(total_tokens), 0) AS tokens,
+                        COALESCE(SUM(cost_cny), 0) AS cost
+                    FROM usage_events
+                    WHERE created_at >= ?
+                    """,
+                    (since_iso,),
+                ).fetchone()
+            return int(row["tokens"] or 0), round(float(row["cost"] or 0), 4)
+
+        active_yesterday = _chat_active(y_start, y_end)
+        active_7 = _chat_active(s7)
+        active_30 = _chat_active(s30)
+        tokens_yesterday, cost_yesterday = _token_cost(y_start, y_end)
+        tokens_30, cost_30 = _token_cost(s30)
+
         used, limit = registration_invite_usage(settings)
         slots = registration_slots_remaining(settings)
         return {
+            "timezone": "Asia/Shanghai",
             "user_count": user_count,
+            "active_users_yesterday": active_yesterday,
+            "active_users_7d": active_7,
+            "active_users_30d": active_30,
+            "tokens_yesterday": tokens_yesterday,
+            "cost_cny_yesterday": cost_yesterday,
+            "tokens_30d": tokens_30,
+            "cost_cny_30d": cost_30,
             "invite_use_count": used,
             "invite_max_uses": limit,
             "registration_slots_remaining": slots,
-            "days": days,
-            "tokens_total": int(usage["tokens"] or 0),
-            "cost_cny_total": round(float(usage["cost"] or 0), 4),
-            "usage_active_users": int(usage["active_users"] or 0),
-            "usage_events": int(usage["events"] or 0),
-            "chat_active_users": int(chat_active["c"] or 0),
             "price_input_cny_per_1m": float(settings.llm_price_input_cny_per_1m),
             "price_output_cny_per_1m": float(settings.llm_price_output_cny_per_1m),
-            "cost_note": "费用为按官方单价估算（输入按 cache miss），非账单原件",
+            "cost_note": (
+                "费用为按官方单价估算（输入按 cache miss），非账单原件；"
+                "活跃=区间内至少发过一次聊天；时间按北京时间"
+            ),
+            "as_of": now_iso,
         }
     finally:
         conn.close()

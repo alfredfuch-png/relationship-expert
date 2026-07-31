@@ -2,15 +2,18 @@ import { useEffect, useState } from 'react'
 import './Admin.css'
 
 type Overview = {
+  timezone?: string
   user_count: number
+  active_users_yesterday: number
+  active_users_7d: number
+  active_users_30d: number
+  tokens_yesterday: number
+  cost_cny_yesterday: number
+  tokens_30d: number
+  cost_cny_30d: number
   invite_use_count: number
   invite_max_uses: number | null
   registration_slots_remaining: number | null
-  days: number
-  tokens_total: number
-  cost_cny_total: number
-  usage_active_users: number
-  chat_active_users: number
   price_input_cny_per_1m: number
   price_output_cny_per_1m: number
   cost_note: string
@@ -249,16 +252,32 @@ export default function Admin() {
             <div className="value">{overview.user_count}</div>
           </div>
           <div className="admin-card">
-            <div className="label">近 {overview.days} 日活跃（聊天）</div>
-            <div className="value">{overview.chat_active_users}</div>
+            <div className="label">昨日活跃用户</div>
+            <div className="value">{overview.active_users_yesterday}</div>
           </div>
           <div className="admin-card">
-            <div className="label">近 {overview.days} 日 Token</div>
-            <div className="value">{fmtTokens(overview.tokens_total)}</div>
+            <div className="label">近 7 日活跃用户</div>
+            <div className="value">{overview.active_users_7d}</div>
           </div>
           <div className="admin-card">
-            <div className="label">近 {overview.days} 日费用估算</div>
-            <div className="value">{fmtMoney(overview.cost_cny_total)}</div>
+            <div className="label">近 30 日活跃用户</div>
+            <div className="value">{overview.active_users_30d}</div>
+          </div>
+          <div className="admin-card">
+            <div className="label">昨日 Token</div>
+            <div className="value">{fmtTokens(overview.tokens_yesterday)}</div>
+          </div>
+          <div className="admin-card">
+            <div className="label">昨日费用估算</div>
+            <div className="value">{fmtMoney(overview.cost_cny_yesterday)}</div>
+          </div>
+          <div className="admin-card">
+            <div className="label">近 30 日 Token</div>
+            <div className="value">{fmtTokens(overview.tokens_30d)}</div>
+          </div>
+          <div className="admin-card">
+            <div className="label">近 30 日费用估算</div>
+            <div className="value">{fmtMoney(overview.cost_cny_30d)}</div>
           </div>
           <div className="admin-card">
             <div className="label">邀请码剩余</div>
