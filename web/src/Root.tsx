@@ -1,16 +1,21 @@
 import { useEffect, useState } from 'react'
 import App from './App.tsx'
 import Admin from './Admin.tsx'
+import Settings from './Settings.tsx'
 import Login from './Login.tsx'
 import './Login.css'
+
+function currentPath(): string {
+  return typeof window !== 'undefined' ? window.location.pathname : '/'
+}
 
 export default function Root() {
   const [checking, setChecking] = useState(true)
   const [authRequired, setAuthRequired] = useState(false)
   const [authenticated, setAuthenticated] = useState(false)
-  const isAdminPath =
-    typeof window !== 'undefined' &&
-    (window.location.pathname === '/admin' || window.location.pathname.startsWith('/admin/'))
+  const path = currentPath()
+  const isAdminPath = path === '/admin' || path.startsWith('/admin/')
+  const isSettingsPath = path === '/settings' || path.startsWith('/settings/')
 
   useEffect(() => {
     let cancelled = false
@@ -50,6 +55,10 @@ export default function Root() {
 
   if (isAdminPath) {
     return <Admin />
+  }
+
+  if (isSettingsPath) {
+    return <Settings />
   }
 
   return <App />

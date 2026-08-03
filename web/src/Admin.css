@@ -78,6 +78,47 @@
   align-items: start;
 }
 
+.admin-layout-experts {
+  margin-top: 1rem;
+}
+
+.admin-index-card {
+  background: rgba(31, 42, 46, 0.04);
+  border: 1px solid rgba(31, 42, 46, 0.08);
+  border-radius: 10px;
+  padding: 0.85rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.admin-index-card .status-body {
+  margin: 0;
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+
+.admin-index-btn {
+  align-self: flex-start;
+  border: none;
+  border-radius: 8px;
+  padding: 0.5rem 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  background: #1a5f5a;
+  color: #fff;
+  font-size: 0.9rem;
+}
+
+.admin-index-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.admin-index-btn:hover:not(:disabled) {
+  background: #154e4a;
+}
+
 .admin-panel {
   background: rgba(255, 255, 255, 0.78);
   border: 1px solid rgba(31, 42, 46, 0.08);
@@ -131,6 +172,147 @@
   border: 1px solid rgba(26, 95, 90, 0.35);
   border-radius: 999px;
   padding: 0.05rem 0.4rem;
+}
+
+.admin-badge-risk {
+  color: #9b1c1c;
+  border-color: rgba(155, 28, 28, 0.45);
+  background: rgba(253, 232, 232, 0.85);
+}
+
+.admin-card-risk {
+  border-color: rgba(155, 28, 28, 0.35);
+  background: rgba(253, 232, 232, 0.72);
+}
+
+.admin-card-risk .value {
+  color: #9b1c1c;
+}
+
+.admin-risk-panel {
+  margin-bottom: 1rem;
+  min-height: unset;
+}
+
+.admin-risk-panel.has-open {
+  border-color: rgba(155, 28, 28, 0.35);
+  box-shadow: 0 0 0 1px rgba(155, 28, 28, 0.08);
+}
+
+.admin-risk-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.admin-risk-head h2 {
+  margin: 0;
+}
+
+.admin-risk-count {
+  font-size: 0.85rem;
+  font-weight: 650;
+  color: #5c6b70;
+}
+
+.admin-risk-count.hot {
+  color: #9b1c1c;
+}
+
+.admin-risk-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.admin-risk-list.compact {
+  max-height: 240px;
+}
+
+.admin-risk-item {
+  border: 1px solid rgba(155, 28, 28, 0.18);
+  border-radius: 10px;
+  padding: 0.65rem 0.75rem;
+  background: rgba(253, 232, 232, 0.35);
+}
+
+.admin-risk-item-top {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  align-items: center;
+  margin-bottom: 0.35rem;
+}
+
+.admin-risk-user {
+  border: none;
+  background: none;
+  padding: 0;
+  color: #9b1c1c;
+  font-weight: 700;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.admin-risk-cats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-bottom: 0.35rem;
+}
+
+.admin-risk-snippet {
+  margin: 0 0 0.45rem;
+  font-size: 0.88rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.admin-ack-btn {
+  border: 1px solid rgba(155, 28, 28, 0.35);
+  border-radius: 8px;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  background: #fff;
+  color: #9b1c1c;
+}
+
+.admin-ack-btn:hover:not(:disabled) {
+  background: #fde8e8;
+}
+
+.admin-ack-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.admin-table tbody tr.risk-row {
+  background: rgba(253, 232, 232, 0.55);
+}
+
+.admin-table tbody tr.risk-row:hover,
+.admin-table tbody tr.risk-row.active {
+  background: rgba(253, 200, 200, 0.65);
+}
+
+.risk-username {
+  color: #9b1c1c;
+  font-weight: 700;
+}
+
+.admin-user-risks {
+  margin-bottom: 0.75rem;
 }
 
 .admin-detail-head {

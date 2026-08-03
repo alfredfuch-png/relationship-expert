@@ -100,6 +100,11 @@ def build_consult_chat_messages(
     questions_guide: str,
     settings: Settings | None = None,
     user_memory: str = "",
+    profile_memory: str = "",
+    advice_memory: str = "",
+    profile_synced: bool = False,
+    persona_text: str | None = None,
+    expert_display_name: str = "阿FU",
 ) -> tuple[list[dict[str, Any]], bool]:
     """Build messages for clarify/advise consult flow. Returns (messages, rag_used)."""
     from app.consult import (
@@ -124,6 +129,8 @@ def build_consult_chat_messages(
         use_notes=use_notes,
         public_deploy=settings.public_deploy,
         questions_guide=questions_guide,
+        persona_text=persona_text,
+        expert_display_name=expert_display_name,
     )
     messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
 
@@ -140,14 +147,35 @@ def build_consult_chat_messages(
         )
         return messages, False
 
-    memory = (user_memory or "").strip()
-    if memory:
+    # Prefer split memories; fall back to legacy user_memory blob.
+    profile = (profile_memory or "").strip()
+    advice = (advice_memory or "").strip()
+    legacy = (user_memory or "").strip()
+    if profile_synced and profile:
         messages.append(
             {
                 "role": "system",
-                "content": f"【用户长时记忆（跨对话，可能含多人；本轮主题优先）】\n{memory}",
+                "content": f"【用户画像记忆（用户已授权同步；本轮主题优先）】\n{profile}",
             }
         )
+    elif profile_synced and legacy and not profile:
+        messages.append(
+            {
+                "role": "system",
+                "content": f"【用户长时记忆（用户已授权同步；本轮主题优先）】\n{legacy}",
+            }
+        )
+    if advice:
+        messages.append(
+            {
+                "role": "system",
+                "content": f"【本专家已给建议记忆（仅本专家可见）】\n{advice}",
+            }
+        )
+    elif legacy and not profile_synced and not advice:
+        # Legacy: inject combined memory only when no split advice yet and no sync gate
+        # Keep off by default for multi-expert privacy; only if nothing else.
+        pass
 
     summary = (context_summary or "").strip()
     if summary:
@@ -229,6 +257,9 @@ async def stream_chat_completion(
         "stream": True,
         "stream_options": {"include_usage": True},
     }
+    max_out = int(settings.chat_max_tokens or 0)
+    if max_out > 0:
+        payload["max_tokens"] = max_out
     # kimi-k3: always thinking; temperature fixed at 1; prefer faster replies for chat UX
     if uses_kimi_chat(settings):
         payload["temperature"] = 1.0

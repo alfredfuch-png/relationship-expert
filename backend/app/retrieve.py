@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from rank_bm25 import BM25Okapi
@@ -34,8 +35,9 @@ class RetrievedChunk:
     source: str
 
 
-def _load_chunks(settings: Settings) -> list[Chunk]:
-    chunks = load_chunks_from_disk(settings.data_dir.resolve())
+def _load_chunks(settings: Settings, data_dir: Path | None = None) -> list[Chunk]:
+    root = (data_dir or settings.data_dir).resolve()
+    chunks = load_chunks_from_disk(root)
     if not chunks:
         raise RuntimeError(
             "Index is empty. Click “Build index” in the sidebar (vault path must exist)."
@@ -142,14 +144,15 @@ async def retrieve_context(
     settings: Settings | None = None,
     top_k: int | None = None,
     meta: dict[str, Any] | None = None,
+    data_dir: Path | None = None,
 ) -> tuple[list[RetrievedChunk], dict[str, Any]]:
     settings = settings or get_settings()
     meta = meta or {}
     effective_top_k = top_k if top_k is not None else settings.retrieve_top_k
     max_per_note = max(0, int(settings.retrieve_max_chunks_per_note))
-    data_dir = settings.data_dir.resolve()
+    resolved_dir = (data_dir or settings.data_dir).resolve()
 
-    chunks = _load_chunks(settings)
+    chunks = _load_chunks(settings, resolved_dir)
     chunk_by_id = {c.id: c for c in chunks}
 
     routing: dict[str, Any] = {
@@ -173,7 +176,7 @@ async def retrieve_context(
         ranked_tags, tag_vocab, _ok = await infer_route_tags_for_query(
             query,
             settings=settings,
-            data_dir=data_dir,
+            data_dir=resolved_dir,
             routing_ready=True,
         )
         if not ranked_tags and not tag_vocab:
@@ -227,7 +230,7 @@ async def retrieve_context(
     bm25_ids = [c.id for _, c in bm25_ordered]
 
     vector_enabled = bool(meta.get("vector_enabled"))
-    loaded = load_chunk_embeddings(data_dir)
+    loaded = load_chunk_embeddings(resolved_dir)
 
     vector_ids: list[str] = []
     if vector_enabled and loaded is not None:

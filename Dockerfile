@@ -15,6 +15,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend/app ./app
 COPY Questions.md ./Questions.md
+COPY experts ./experts
 COPY --from=web-build /web/dist ./web/dist
 
 ENV PROJECT_ROOT=/app \

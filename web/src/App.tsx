@@ -47,6 +47,15 @@ type ChatThread = {
   messages: ChatMessage[]
   updatedAt: number
   contextSummary?: string
+  expertId?: string
+  profileSynced?: boolean
+}
+
+type ExpertInfo = {
+  id: string
+  display_name: string
+  avatar_label: string
+  short_bio: string
 }
 
 /** Separate from Digital Twin so both apps can save threads side-by-side. */
@@ -148,15 +157,19 @@ type AppConfig = {
   server_chat?: boolean
   username?: string | null
   is_admin?: boolean
+  default_expert_id?: string
+  experts?: ExpertInfo[]
 }
 
 const DEFAULT_CONFIG: AppConfig = {
   public_deploy: false,
-  show_sources: true,
-  show_routing: true,
-  allow_index: true,
+  show_sources: false,
+  show_routing: false,
+  allow_index: false,
   server_chat: false,
   is_admin: false,
+  default_expert_id: 'afu',
+  experts: [{ id: 'afu', display_name: '阿FU', avatar_label: '阿FU', short_bio: '' }],
 }
 
 const MAX_IMAGES = 3
@@ -199,6 +212,8 @@ async function streamChat(
     history: { role: Role; content: string }[]
     context_summary: string
     images: ChatImagePayload[]
+    expert_id?: string
+    profile_synced?: boolean
   },
   onMeta: (m: StreamMeta) => void,
   onToken: (t: string) => void,
@@ -376,26 +391,57 @@ async function streamChat(
   }
 }
 
-function emptyThread(): ChatThread {
+function emptyThread(expertId = 'afu'): ChatThread {
   const id = newId()
-  return { id, title: '新对话', messages: [], updatedAt: Date.now() }
+  return {
+    id,
+    title: '新对话',
+    messages: [],
+    updatedAt: Date.now(),
+    expertId,
+    profileSynced: false,
+  }
+}
+
+function normalizeThread(t: ChatThread, defaultExpertId = 'afu'): ChatThread {
+  return {
+    ...t,
+    expertId: (t.expertId || defaultExpertId).trim() || defaultExpertId,
+    profileSynced: Boolean(t.profileSynced),
+  }
+}
+
+function normalizeThreads(list: ChatThread[], defaultExpertId = 'afu'): ChatThread[] {
+  return list.map((t) => normalizeThread(t, defaultExpertId))
+}
+
+function initialChatState(): { threads: ChatThread[]; activeId: string } {
+  const saved = loadPersisted()
+  if (saved?.threads.length) {
+    const threads = capThreads(normalizeThreads(saved.threads))
+    const activeId =
+      saved.activeId && threads.some((t) => t.id === saved.activeId)
+        ? saved.activeId
+        : threads[0]!.id
+    return { threads, activeId }
+  }
+  const t = emptyThread()
+  return { threads: [t], activeId: t.id }
 }
 
 export default function App() {
   const appConfig = useAppConfig()
-  const { status, loading: statusLoading, refresh } = useIndexStatus()
-  const [indexing, setIndexing] = useState(false)
+  const experts =
+    appConfig.experts && appConfig.experts.length > 0
+      ? appConfig.experts
+      : (DEFAULT_CONFIG.experts as ExpertInfo[])
+  const defaultExpertId = appConfig.default_expert_id || 'afu'
+  const { status } = useIndexStatus()
   const [threadsLoaded, setThreadsLoaded] = useState(!DEFAULT_CONFIG.server_chat)
-  const [threads, setThreads] = useState<ChatThread[]>(() => {
-    const saved = loadPersisted()
-    if (saved?.threads.length) return capThreads(saved.threads)
-    return [emptyThread()]
-  })
-  const [activeId, setActiveId] = useState(() => {
-    const saved = loadPersisted()
-    if (saved?.activeId) return saved.activeId
-    return newId()
-  })
+  const [pickerExpertId, setPickerExpertId] = useState(defaultExpertId)
+  const [boot] = useState(initialChatState)
+  const [threads, setThreads] = useState(boot.threads)
+  const [activeId, setActiveId] = useState(boot.activeId)
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
   const [pendingImages, setPendingImages] = useState<ChatImagePayload[]>([])
@@ -403,7 +449,9 @@ export default function App() {
   const [memoryOpen, setMemoryOpen] = useState(false)
   const [memoryText, setMemoryText] = useState('')
   const [memoryLoading, setMemoryLoading] = useState(false)
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const accountMenuRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef<AbortController | null>(null)
   const runIdRef = useRef(0)
@@ -420,18 +468,46 @@ export default function App() {
     activeIdRef.current = activeId
   }, [activeId])
 
+  useEffect(() => {
+    if (!accountMenuOpen) return
+    const onDoc = (ev: Event) => {
+      const el = accountMenuRef.current
+      if (el && !el.contains(ev.target as Node)) {
+        setAccountMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onDoc)
+    return () => document.removeEventListener('mousedown', onDoc)
+  }, [accountMenuOpen])
+
+  useEffect(() => {
+    const ids = new Set(experts.map((e) => e.id))
+    setPickerExpertId((prev) => (ids.has(prev) ? prev : defaultExpertId))
+  }, [experts, defaultExpertId])
+
   const serverChat = Boolean(appConfig.server_chat)
   const activeThread = threads.find((t) => t.id === activeId)
   const contextSummary = activeThread?.contextSummary ?? ''
+  const activeExpertId = activeThread?.expertId || defaultExpertId
+  const activeExpert =
+    experts.find((e) => e.id === activeExpertId) ??
+    experts[0] ??
+    ({
+      id: 'afu',
+      display_name: '阿FU',
+      avatar_label: '阿FU',
+      short_bio: '',
+    } satisfies ExpertInfo)
+  const multiExperts = experts.length > 1
 
   useEffect(() => {
     if (!serverChat) {
       const saved = loadPersisted()
       if (saved?.threads.length) {
-        setThreads(capThreads(saved.threads))
+        setThreads(capThreads(normalizeThreads(saved.threads, defaultExpertId)))
         setActiveId(saved.activeId)
       } else {
-        const t = emptyThread()
+        const t = emptyThread(defaultExpertId)
         setThreads([t])
         setActiveId(t.id)
       }
@@ -449,18 +525,20 @@ export default function App() {
         if (cancelled) return
         const list =
           Array.isArray(state.threads) && state.threads.length
-            ? capThreads(state.threads)
-            : [emptyThread()]
+            ? capThreads(normalizeThreads(state.threads, defaultExpertId))
+            : [emptyThread(defaultExpertId)]
         const aid =
           state.active_id && list.some((t) => t.id === state.active_id)
             ? state.active_id
             : list[0]!.id
         setThreads(list)
         setActiveId(aid)
+        const active = list.find((t) => t.id === aid)
+        if (active?.expertId) setPickerExpertId(active.expertId)
       })
       .catch(() => {
         if (!cancelled) {
-          const t = emptyThread()
+          const t = emptyThread(defaultExpertId)
           setThreads([t])
           setActiveId(t.id)
         }
@@ -471,7 +549,7 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [serverChat])
+  }, [serverChat, defaultExpertId])
 
   useEffect(() => {
     if (!threadsLoaded) return
@@ -497,24 +575,17 @@ export default function App() {
     [threads],
   )
 
-  const ready = Boolean(status?.ready)
-  const metaLine = useMemo(() => {
-    if (!status) return '正在连接…'
-    const chunks = status.chunk_count as number | undefined
-    const vec = status.vector_enabled ? '向量 + BM25' : '仅 BM25'
-    const at = status.last_indexed_at as string | undefined
-    if (appConfig.public_deploy) {
-      return `${ready ? '已就绪' : '服务暂不可用'} · ${chunks ?? 0} 个知识片段${at ? ` · ${at}` : ''}`
+  const ready = useMemo(() => {
+    if (!status) return false
+    const map = status.experts as Record<string, { ready?: boolean }> | undefined
+    if (map && activeExpertId && typeof map[activeExpertId]?.ready === 'boolean') {
+      return Boolean(map[activeExpertId]?.ready)
     }
-    const tagN = Number(status.tag_count ?? 0)
-    const tagsLine =
-      Boolean(status.tag_routing_ready) && tagN > 0
-        ? ` · ${tagN} 个标签（路由已启用）`
-        : tagN > 0
-          ? ` · ${tagN} 个标签（重建后可路由）`
-          : ''
-    return `${ready ? '已就绪' : '未索引'} · ${chunks ?? 0} 个切片 · ${vec}${tagsLine}${at ? ` · ${at}` : ''}`
-  }, [status, ready, appConfig.public_deploy])
+    if (activeExpertId === 'afu' || activeExpertId === defaultExpertId) {
+      return Boolean(status.ready)
+    }
+    return Boolean(status.ready)
+  }, [status, activeExpertId, defaultExpertId])
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
@@ -539,10 +610,41 @@ export default function App() {
 
   function handleNewChat() {
     if (generatingRef.current || sending) stopGeneration()
-    const id = newId()
-    const thread: ChatThread = { id, title: '新对话', messages: [], updatedAt: Date.now() }
+    const thread = emptyThread(pickerExpertId || defaultExpertId)
     setThreads((ts) => capThreads([thread, ...ts]))
-    setActiveId(id)
+    setActiveId(thread.id)
+    setInput('')
+    setPendingImages([])
+    setPendingPreviews([])
+  }
+
+  function handleSelectExpert(nextExpertId: string) {
+    const next = (nextExpertId || defaultExpertId).trim() || defaultExpertId
+    setPickerExpertId(next)
+    const active = threads.find((t) => t.id === activeId)
+    if (!active) {
+      const thread = emptyThread(next)
+      setThreads([thread])
+      setActiveId(thread.id)
+      return
+    }
+    // Empty thread: switch expert in place so the next message uses it.
+    if (active.messages.length === 0) {
+      setThreads((ts) =>
+        capThreads(
+          ts.map((t) =>
+            t.id === activeId ? { ...t, expertId: next, updatedAt: Date.now() } : t,
+          ),
+        ),
+      )
+      return
+    }
+    // Thread already has messages for another expert → open a fresh chat.
+    if ((active.expertId || defaultExpertId) === next) return
+    if (generatingRef.current || sending) stopGeneration()
+    const thread = emptyThread(next)
+    setThreads((ts) => capThreads([thread, ...ts]))
+    setActiveId(thread.id)
     setInput('')
     setPendingImages([])
     setPendingPreviews([])
@@ -552,6 +654,8 @@ export default function App() {
     if (id === activeId) return
     if (generatingRef.current || sending) stopGeneration()
     setActiveId(id)
+    const t = threads.find((x) => x.id === id)
+    if (t?.expertId) setPickerExpertId(t.expertId)
     setInput('')
     setPendingImages([])
     setPendingPreviews([])
@@ -564,31 +668,27 @@ export default function App() {
     const nextList: ChatThread[] =
       filtered.length > 0
         ? capThreads(filtered)
-        : [{ id: newId(), title: '新对话', messages: [], updatedAt: Date.now() }]
+        : [emptyThread(pickerExpertId || defaultExpertId)]
     setThreads(nextList)
     if (activeId === idToDelete) {
       const sorted = [...nextList].sort((a, b) => b.updatedAt - a.updatedAt)
       setActiveId(sorted[0]!.id)
+      if (sorted[0]?.expertId) setPickerExpertId(sorted[0].expertId)
     }
     setInput('')
   }
 
-  async function handleIndex() {
-    setIndexing(true)
-    try {
-      const r = await fetch('/api/index', { method: 'POST', credentials: 'include' })
-      if (!r.ok) {
-        const d = (await r.json().catch(() => null)) as { detail?: unknown } | null
-        const detail =
-          typeof d?.detail === 'string' ? d.detail : JSON.stringify(d?.detail ?? {})
-        throw new Error(detail || r.statusText)
-      }
-      await refresh()
-    } catch (e) {
-      alert(e instanceof Error ? e.message : String(e))
-    } finally {
-      setIndexing(false)
-    }
+  function toggleProfileSync() {
+    if (sending) return
+    setThreads((ts) =>
+      capThreads(
+        ts.map((t) =>
+          t.id === activeId
+            ? { ...t, profileSynced: !Boolean(t.profileSynced), updatedAt: Date.now() }
+            : t,
+        ),
+      ),
+    )
   }
 
   function stopGeneration() {
@@ -693,6 +793,8 @@ export default function App() {
         history,
         context_summary: contextSummary,
         images: imagesToSend,
+        expert_id: activeThread?.expertId || defaultExpertId,
+        profile_synced: Boolean(activeThread?.profileSynced),
       },
       (meta) => {
         if (!stillActive()) return
@@ -757,13 +859,29 @@ export default function App() {
     setMemoryOpen(true)
     setMemoryLoading(true)
     try {
-      const r = await fetch('/api/user/memory', { credentials: 'include' })
-      if (!r.ok) {
-        setMemoryText(r.status === 400 ? '登录账户后才会保存跨对话记忆。' : '无法加载记忆。')
+      const eid = encodeURIComponent(activeExpertId)
+      const [profileRes, adviceRes] = await Promise.all([
+        fetch('/api/user/memory?scope=profile', { credentials: 'include' }),
+        fetch(`/api/user/memory?scope=advice&expert_id=${eid}`, { credentials: 'include' }),
+      ])
+      if (!profileRes.ok) {
+        setMemoryText(
+          profileRes.status === 400 ? '登录账户后才会保存跨对话记忆。' : '无法加载记忆。',
+        )
         return
       }
-      const data = (await r.json()) as { memory?: string }
-      setMemoryText((data.memory || '').trim() || '（暂无长时记忆。有效咨询后会自动积累。）')
+      const profile = (await profileRes.json()) as { memory?: string }
+      const advice = adviceRes.ok
+        ? ((await adviceRes.json()) as { memory?: string })
+        : { memory: '' }
+      const profileText =
+        (profile.memory || '').trim() || '（暂无共享用户画像。有效咨询后会自动积累。）'
+      const adviceText =
+        (advice.memory || '').trim() ||
+        `（暂无「${activeExpert.display_name}」的建议记忆。）`
+      setMemoryText(
+        `【共享用户画像】\n${profileText}\n\n【${activeExpert.display_name} · 建议记忆（仅本专家）】\n${adviceText}`,
+      )
     } catch {
       setMemoryText('无法加载记忆。')
     } finally {
@@ -772,7 +890,7 @@ export default function App() {
   }
 
   async function clearMemory() {
-    if (!confirm('确定清空跨对话长时记忆？之后新对话将不再引用旧对象信息。')) return
+    if (!confirm('确定清空共享用户画像与各专家建议记忆？之后新对话将不再引用旧信息。')) return
     setMemoryLoading(true)
     try {
       const r = await fetch('/api/user/memory', { method: 'DELETE', credentials: 'include' })
@@ -815,11 +933,35 @@ export default function App() {
           <span className="logo">♥</span>
           <span>Romance Expert</span>
         </div>
-        <p className="muted small">
-          {appConfig.public_deploy
-            ? '亲密关系顾问 · 在线版'
-            : '亲密关系 RAG · 仅索引「关于亲密关系」文件夹'}
-        </p>
+        <p className="muted small">你的脱单与亲密关系顾问团</p>
+
+        <div className="expert-picker">
+          <div className="status-title">咨询专家</div>
+          {multiExperts ? (
+            <select
+              className="expert-select"
+              value={activeExpertId}
+              disabled={sending}
+              aria-label="选择咨询专家"
+              onChange={(e) => handleSelectExpert(e.target.value)}
+            >
+              {experts.map((ex) => (
+                <option key={ex.id} value={ex.id}>
+                  {ex.display_name}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <p className="expert-name">{activeExpert.display_name}</p>
+          )}
+          {activeExpert.short_bio ? (
+            <p className="muted small">{activeExpert.short_bio}</p>
+          ) : null}
+          <p className="muted small">
+            当前对话：{activeExpert.display_name}
+            {multiExperts ? '（切换专家会开启对应对话）' : ''}
+          </p>
+        </div>
 
         <button
           type="button"
@@ -847,6 +989,9 @@ export default function App() {
                 >
                   <span className="recents-title">{t.title}</span>
                   <span className="recents-meta muted small">
+                    {multiExperts
+                      ? `${experts.find((e) => e.id === (t.expertId || defaultExpertId))?.display_name ?? t.expertId ?? defaultExpertId} · `
+                      : ''}
                     {new Date(t.updatedAt).toLocaleString(undefined, {
                       month: 'short',
                       day: 'numeric',
@@ -870,70 +1015,62 @@ export default function App() {
           </div>
         </div>
 
-        {appConfig.allow_index ? (
-          <div className="status-card">
-            <div className="status-title">索引</div>
-            <p className="status-body">{statusLoading ? '加载中…' : metaLine}</p>
-            {(status?.error as string | undefined)?.length ? (
-              <p className="warn small">{String(status?.error)}</p>
+        <footer className="sidebar-foot">
+          <div className="account-dock" ref={accountMenuRef}>
+            {accountMenuOpen && appConfig.username ? (
+              <div className="account-menu" role="menu">
+                <button
+                  type="button"
+                  className="account-menu-item"
+                  role="menuitem"
+                  onClick={() => {
+                    setAccountMenuOpen(false)
+                    void openMemoryPanel()
+                  }}
+                >
+                  <span className="account-menu-icon" aria-hidden>
+                    M
+                  </span>
+                  <span>我的记忆</span>
+                  <span className="account-menu-chevron">&gt;</span>
+                </button>
+                <button
+                  type="button"
+                  className="account-menu-item"
+                  role="menuitem"
+                  onClick={() => {
+                    window.location.href = '/settings'
+                  }}
+                >
+                  <span className="account-menu-icon" aria-hidden>
+                    S
+                  </span>
+                  <span>设置</span>
+                  <span className="account-menu-chevron">&gt;</span>
+                </button>
+              </div>
             ) : null}
             <button
               type="button"
-              className="btn secondary"
-              disabled={indexing}
-              onClick={() => void handleIndex()}
-            >
-              {indexing ? '正在构建…' : '构建索引'}
-            </button>
-          </div>
-        ) : (
-          <div className="status-card">
-            <div className="status-title">状态</div>
-            <p className="status-body">{statusLoading ? '加载中…' : metaLine}</p>
-          </div>
-        )}
-
-        <footer className="sidebar-foot muted small">
-          {appConfig.username ? (
-            <span>
-              已登录：<strong>{appConfig.username}</strong>
-              {serverChat ? ' · 对话已云端保存' : ''}
-            </span>
-          ) : (
-            <span>聊天：Kimi · 知识库检索仅在建议阶段</span>
-          )}
-          {appConfig.username ? (
-            <button
-              type="button"
-              className="btn secondary logout-btn"
-              onClick={() => void openMemoryPanel()}
-            >
-              我的记忆
-            </button>
-          ) : null}
-          {appConfig.is_admin ? (
-            <button
-              type="button"
-              className="btn secondary logout-btn"
+              className="account-bar"
               onClick={() => {
-                window.location.href = '/admin'
+                if (!appConfig.username) {
+                  window.location.href = '/'
+                  return
+                }
+                setAccountMenuOpen((v) => !v)
               }}
             >
-              运营后台
+              <span className="account-avatar" aria-hidden>
+                {(appConfig.username || '登').slice(0, 1)}
+              </span>
+              <span className="account-name">
+                {appConfig.username || '登录'}
+              </span>
             </button>
-          ) : null}
-          {appConfig.auth_required ? (
-            <button
-              type="button"
-              className="btn secondary logout-btn"
-              onClick={() => {
-                void fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }).then(
-                  () => window.location.reload(),
-                )
-              }}
-            >
-              退出登录
-            </button>
+          </div>
+          {serverChat && appConfig.username ? (
+            <p className="muted small account-cloud-hint">对话已云端保存</p>
           ) : null}
         </footer>
       </aside>
@@ -954,7 +1091,7 @@ export default function App() {
               </button>
             </div>
             <p className="muted small">
-              跨对话自动积累的用户画像与对象档案，仅你的账户可见。
+              共享用户画像可跨专家；各专家的建议记忆相互隔离。点「同步用户信息」后，当前专家才会读取画像。
             </p>
             <pre className="memory-body">{memoryLoading ? '加载中…' : memoryText}</pre>
             <div className="memory-actions">
@@ -982,26 +1119,42 @@ export default function App() {
             >
               + 新对话
             </button>
-            <h1>{activeThread?.title ?? '对话'}</h1>
+            <h1>
+              {activeThread?.title ?? '对话'}
+              {activeThread?.title && activeThread.title !== '新对话' ? (
+                <span className="topbar-expert muted"> · {activeExpert.display_name}</span>
+              ) : null}
+            </h1>
           </div>
+          {appConfig.is_admin ? (
+            <button
+              type="button"
+              className="btn secondary topbar-admin"
+              onClick={() => {
+                window.location.href = '/admin'
+              }}
+            >
+              运营后台
+            </button>
+          ) : null}
         </header>
 
         <div className="thread" ref={scrollRef}>
           {messages.length === 0 ? (
             <div className="empty">
-              <h2>亲密关系咨询</h2>
+              <h2>{activeExpert.display_name}</h2>
               <p className="muted">
                 {ready
-                  ? '可以直接提问。信息不够时我会先追问；也可上传聊天截图。'
-                  : appConfig.allow_index
-                    ? '请先构建索引，然后开始对话。'
-                    : '知识库尚未就绪，请稍后再试。'}
+                  ? activeExpert.short_bio || '亲密关系咨询'
+                  : '知识库尚未就绪，请稍后再试。'}
               </p>
             </div>
           ) : (
             messages.map((msg, i) => (
               <div key={`${activeId}-${i}-${msg.role}`} className={`bubble-row ${msg.role}`}>
-                <div className="avatar">{msg.role === 'user' ? '我' : '阿FU'}</div>
+                <div className="avatar">
+                  {msg.role === 'user' ? '我' : activeExpert.avatar_label}
+                </div>
                 <div className={`bubble ${msg.role}`}>
                   {msg.phase === 'clarify' ? (
                     <div className="phase-tag">追问中</div>
@@ -1028,46 +1181,6 @@ export default function App() {
                       )}
                     </div>
                   )}
-                  {appConfig.show_routing && msg.role === 'assistant' && msg.routing?.tag_routing ? (
-                    <div className="routing-hint muted small">
-                      {(msg.routing.applied_tags?.length ?? 0) > 0 ? (
-                        <>
-                          <strong>标签收窄</strong>：{msg.routing.applied_tags!.join('、')}
-                          {msg.routing.scoped ? (
-                            <span> （仅限带上述标签的笔记检索）</span>
-                          ) : (
-                            <span>
-                              {msg.routing.fallback_reason
-                                ? ` （未收窄：${msg.routing.fallback_reason}）`
-                                : ' （未收窄）'}
-                            </span>
-                          )}
-                        </>
-                      ) : msg.routing.tag_routing_ready === false &&
-                        msg.routing.fallback_reason === 'rebuild_index_for_tag_router' ? (
-                        <span>
-                          点击 <strong>构建索引</strong> 后可启用标签语义路由。
-                        </span>
-                      ) : msg.routing.fallback_reason ? (
-                        <span>标签路由：{msg.routing.fallback_reason}</span>
-                      ) : null}
-                    </div>
-                  ) : null}
-                  {appConfig.show_sources && msg.sources?.length ? (
-                    <div className="sources">
-                      <div className="src-title">出处</div>
-                      <ul>
-                        {msg.sources.map((s) => (
-                          <li key={s.id}>
-                            <span className="pill">{s.source}</span>
-                            <strong>{s.note_title}</strong>
-                            <span className="muted"> · {s.heading_path}</span>
-                            <div className="path muted small">{s.note_path}</div>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  ) : null}
                 </div>
               </div>
             ))
@@ -1106,15 +1219,26 @@ export default function App() {
                 e.target.value = ''
               }}
             />
-            <button
-              type="button"
-              className="btn secondary attach-btn"
-              disabled={!ready || sending || !threadsLoaded || pendingImages.length >= MAX_IMAGES}
-              onClick={() => fileInputRef.current?.click()}
-              title="上传聊天截图"
-            >
-              截图
-            </button>
+            <div className="composer-tools">
+              <button
+                type="button"
+                className="btn secondary attach-btn"
+                disabled={!ready || sending || !threadsLoaded || pendingImages.length >= MAX_IMAGES}
+                onClick={() => fileInputRef.current?.click()}
+                title="上传聊天截图"
+              >
+                截图
+              </button>
+              <button
+                type="button"
+                className={`btn secondary sync-btn${activeThread?.profileSynced ? ' on' : ''}`}
+                disabled={!threadsLoaded || sending}
+                onClick={toggleProfileSync}
+                title="同步后，专家可了解你已在其他专家处提供的个人信息和经历，但不会得知其他专家的建议"
+              >
+                {activeThread?.profileSynced ? '已同步' : '同步信息'}
+              </button>
+            </div>
             <textarea
               className="input"
               rows={2}
@@ -1122,8 +1246,8 @@ export default function App() {
                 sending
                   ? '生成中…可点「停止」后修改问题'
                   : ready
-                    ? '描述你的情况…（可先上传截图）信息不够我会追问'
-                    : '请先构建索引再发送'
+                    ? `向${activeExpert.display_name}描述你的情况…（可先上传截图）信息不够我会追问`
+                    : '知识库尚未就绪'
               }
               value={input}
               disabled={!ready || !threadsLoaded}
@@ -1173,6 +1297,15 @@ export default function App() {
               </button>
             </div>
           </div>
+          {!activeThread?.profileSynced ? (
+            <p className="composer-hint muted small">
+              未同步你的信息。同步后，专家可了解你已在其他专家处提供的个人信息和经历，但不会得知其他专家的建议
+            </p>
+          ) : (
+            <p className="composer-hint muted small">
+              已同步你的信息。专家可了解你已在其他专家处提供的个人信息和经历，但不会得知其他专家的建议
+            </p>
+          )}
         </form>
       </main>
     </div>

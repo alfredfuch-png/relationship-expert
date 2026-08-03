@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     public_deploy: bool = False
     # Optional HTTPS URL to a zip of pre-built data/ (chunks + embeddings) for production.
     index_bundle_url: str = ""
+    # Optional per-expert index zips: "afu=https://...,prof_socio=https://..." or JSON object.
+    index_bundle_urls: str = ""
+    # Expert packs directory (persona / Questions / manifest). Default: <project>/experts
+    experts_root: str = ""
+    default_expert_id: str = "afu"
 
     # Legacy single shared password (used only when no accounts exist in users.db).
     app_password: str = ""
@@ -96,10 +101,14 @@ class Settings(BaseSettings):
 
     # Retrieval: cap how many chunks may come from one note before others get a turn;
     # then backfill to retrieve_top_k so context is not empty.
-    retrieve_top_k: int = 12
+    retrieve_top_k: int = 7
     retrieve_max_chunks_per_note: int = 4
     # Below this fused RRF score, retrieved chunks are treated as not relevant → general LLM answer.
     rag_min_fused_score: float = 0.01
+    # Main consult stream completion cap (output tokens).
+    chat_max_tokens: int = 1200
+    # Hard cap for stored/injected profile & advice memory (Unicode characters, not tokens).
+    memory_max_chars: int = 4000
 
 
 def get_settings() -> Settings:

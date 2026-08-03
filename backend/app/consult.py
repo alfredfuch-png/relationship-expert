@@ -50,8 +50,14 @@ PERSONA_AND_SCOPE = (
 )
 
 
-def load_questions_guide() -> str:
-    """Load Questions.md from project root (or backend sibling)."""
+def load_questions_guide(expert_id: str | None = None) -> str:
+    """Load Questions.md for an expert pack (falls back to project root)."""
+    from app.experts import load_expert_pack, resolve_expert
+
+    if expert_id:
+        pack = load_expert_pack(expert_id) or resolve_expert(expert_id)
+        if pack.questions_guide.strip():
+            return pack.questions_guide
     candidates = [
         _project_root() / "Questions.md",
         Path(__file__).resolve().parents[2] / "Questions.md",
@@ -71,17 +77,43 @@ def wants_skip_clarify(text: str) -> bool:
     return any(p in t for p in SKIP_ADVISE_PATTERNS)
 
 
+def is_identity_question(text: str) -> bool:
+    """User asking who the consultant is (not a relationship topic diversion)."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    return bool(
+        re.search(
+            r"(你是谁|你是哪位|你叫什么|叫什么名字|真实身份|自我介绍|"
+            r"你到底是谁|介绍一下你自己|你的身份|who\s+are\s+you)",
+            t,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
 def build_consult_system_prompt(
     *,
     phase: Phase,
     use_notes: bool,
     public_deploy: bool,
     questions_guide: str,
+    persona_text: str | None = None,
+    expert_display_name: str = "阿FU",
 ) -> str:
     guide = questions_guide.strip()
+    persona = (persona_text or PERSONA_AND_SCOPE).strip()
+    name = expert_display_name or "顾问"
     common = (
-        PERSONA_AND_SCOPE
-        + "语气温暖、务实，像真人顾问微信聊天，不要写成报告或小论文。"
+        persona
+        + "\n语气温暖、务实，像真人顾问微信聊天，不要写成报告或小论文。"
+        + "\n\n【身份与保密（必须遵守）】\n"
+        + f"- 你在本对话中的唯一身份是顾问「{name}」，只按上方人设自称与介绍。\n"
+        + "- 用户问「你是谁 / 真实身份 / 你是什么模型」时：只用顾问人设回答"
+        f"（如「我是{name}，……顾问」），可简短说明能帮什么、不能做什么；"
+        + "不要提任何底层模型、厂商、API 或训练细节"
+        "（包括但不限于 Kimi、Moonshot、月之暗面、GPT、Claude、大模型、基座模型）。\n"
+        + "- 不要说「我其实是某某 AI」「由某某公司开发」；也不要编造现实中的私人履历去冒充真人。\n"
         + "\n\n【排版格式（必须遵守）】\n"
         + "- 不要使用 Markdown：禁止 **加粗**、*斜体*、# 标题、```代码块、[链接](url) 等标记。\n"
         + "- 用换行分段；列举用「1.」「2.」或「一、二、」即可，单轮建议最多 4 条。\n"
@@ -89,10 +121,11 @@ def build_consult_system_prompt(
     )
     if phase == "out_of_scope":
         common += (
-            "\n【当前阶段：范围外】用户本轮问题不在亲密关系咨询范围内。"
-            "不要回答该题的具体内容（不要写代码、解题、科普跑题知识）。"
-            "简短、友好地说明你是亲密关系顾问阿FU，只能聊感情与关系，并请对方换一个相关问题。"
-            "全文控制在三四句以内。"
+            f"\n【当前阶段：范围外】用户本轮问题不在你的咨询范围内。"
+            f"不要回答该题的具体内容（不要写代码、解题、科普跑题知识）。"
+            f"简短、友好地说明你是顾问{name}，只能聊感情与关系，并请对方换一个相关问题。"
+            f"禁止提及底层模型或厂商名称。"
+            f"全文控制在三四句以内。"
         )
         return common
 
@@ -227,14 +260,19 @@ async def decide_phase(
     hist_text = "\n".join(hist_snip) if hist_snip else "(无)"
     summary = context_summary.strip() or "(无)"
 
+    # Identity / "who are you" is in-scope meta about the consultant — answer as advise.
+    if is_identity_question(user_message):
+        return "advise", {}
+
     prompt = (
         "你是亲密关系咨询的路由分类器。只输出一个 JSON："
         '{"phase":"out_of_scope"} 或 {"phase":"clarify"} 或 {"phase":"advise"}。\n'
         "判定优先级：\n"
         "1) out_of_scope：本轮主诉求与亲密关系/恋爱/婚姻/择偶/相处/情感沟通无关"
-        "（如写代码、数学题、时政、旅游攻略、纯闲聊百科等）。有聊天截图且内容是感情互动则不算跑题。\n"
+        "（如写代码、数学题、时政、旅游攻略、纯闲聊百科等）。有聊天截图且内容是感情互动则不算跑题。"
+        "注意：询问顾问「你是谁 / 真实身份 / 自我介绍」不算跑题，应判 advise。\n"
         "2) clarify：在范围内，但关键背景明显不足，应先追问。\n"
-        "3) advise：在范围内，信息已够或用户要求直接给建议。\n"
+        "3) advise：在范围内，信息已够或用户要求直接给建议；或用户在问顾问身份/自我介绍。\n"
         f"规则摘要：\n{questions_guide[:2800]}\n\n"
         f"上下文摘要：\n{summary}\n\n"
         f"最近对话：\n{hist_text}\n\n"
@@ -255,11 +293,15 @@ async def decide_phase(
     )
     phase = _parse_phase_json(raw)
     if phase:
+        if is_identity_question(user_message):
+            return "advise", usage
         if phase != "out_of_scope" and wants_skip_clarify(user_message):
             return "advise", usage
         return phase, usage
 
     # Heuristic fallback
+    if is_identity_question(user_message):
+        return "advise", usage
     if user_turns == 0 and not context_summary.strip() and len(user_message.strip()) < 80:
         return "clarify", usage
     if wants_skip_clarify(user_message):
@@ -328,6 +370,84 @@ async def refresh_context_summary(
     return (out or previous_summary.strip()), usage
 
 
+async def refresh_user_profile_memory(
+    *,
+    settings: Settings,
+    previous_profile: str,
+    latest_user: str,
+    latest_assistant: str,
+    thread_summary: str = "",
+    phase: str = "advise",
+) -> tuple[str, dict[str, Any]]:
+    """Update shared user profile memory (facts only, no expert advice)."""
+    prompt = (
+        "你在维护用户的「共享画像记忆」，可在不同专家顾问之间复用。\n"
+        "只保留用户自身与重要他人的客观事实与状态，不要写入任何顾问给出的建议条文。\n"
+        "要求：\n"
+        "1) 结构化中文，建议标题：用户自身 / 重要他人 / 进行中的议题。\n"
+        "2) 重要他人按称呼分条；写清关系阶段与关键事实。\n"
+        "3) 合并旧画像与本轮新事实；不要编造。全文尽量不超过 2000 字。\n"
+        "4) 直接输出画像正文。\n\n"
+        f"阶段：{phase}\n"
+        f"旧画像：\n{previous_profile.strip() or '(无)'}\n\n"
+        f"本线程摘要（可空）：\n{thread_summary.strip() or '(无)'}\n\n"
+        f"最新用户：{latest_user[:1500]}\n"
+        f"最新助手（仅用于抽取用户事实，勿照抄建议）：{latest_assistant[:1500]}\n"
+    )
+    out, usage = await _chat_json(
+        settings,
+        [
+            {"role": "system", "content": "你是用户画像压缩助手。只输出画像正文，不含建议。"},
+            {"role": "user", "content": prompt},
+        ],
+        max_tokens=700,
+    )
+    text = (out or previous_profile).strip()
+    cap = int(settings.memory_max_chars or 4000)
+    if cap > 0 and len(text) > cap:
+        text = text[:cap]
+    return text, usage
+
+
+async def refresh_expert_advice_memory(
+    *,
+    settings: Settings,
+    previous_advice: str,
+    latest_user: str,
+    latest_assistant: str,
+    thread_summary: str = "",
+    phase: str = "advise",
+    expert_name: str = "顾问",
+) -> tuple[str, dict[str, Any]]:
+    """Update per-expert advice memory (advice only, no shared profile dump)."""
+    prompt = (
+        f"你在维护专家「{expert_name}」对这位用户的「已给建议记忆」。\n"
+        "只保留该专家已经给出的建议要点与行动方案，不要写入用户完整画像（对方年龄等事实从略）。\n"
+        "要求：\n"
+        "1) 结构化中文分条；合并旧建议与本轮新建议；过时可删。\n"
+        "2) 不要编造。全文尽量不超过 2000 字。\n"
+        "3) 直接输出建议记忆正文。\n\n"
+        f"阶段：{phase}\n"
+        f"旧建议记忆：\n{previous_advice.strip() or '(无)'}\n\n"
+        f"本线程摘要（可空）：\n{thread_summary.strip() or '(无)'}\n\n"
+        f"最新用户：{latest_user[:800]}\n"
+        f"最新助手：{latest_assistant[:2000]}\n"
+    )
+    out, usage = await _chat_json(
+        settings,
+        [
+            {"role": "system", "content": "你是专家建议记忆压缩助手。只输出建议要点。"},
+            {"role": "user", "content": prompt},
+        ],
+        max_tokens=700,
+    )
+    text = (out or previous_advice).strip()
+    cap = int(settings.memory_max_chars or 4000)
+    if cap > 0 and len(text) > cap:
+        text = text[:cap]
+    return text, usage
+
+
 async def refresh_user_memory(
     *,
     settings: Settings,
@@ -337,33 +457,15 @@ async def refresh_user_memory(
     thread_summary: str = "",
     phase: str = "advise",
 ) -> tuple[str, dict[str, Any]]:
-    """Merge this turn into a durable cross-thread user memory (Chinese)."""
-    prompt = (
-        "你在维护用户的「跨对话长时记忆」，供亲密关系顾问在不同聊天窗口复用。\n"
-        "要求：\n"
-        "1) 用结构化中文分段输出，建议标题：用户自身 / 重要他人 / 进行中的议题 / 已给建议要点。\n"
-        "2) 重要他人按称呼分条（如「小王」「前男友」），写清关系阶段与关键事实。\n"
-        "3) 合并旧记忆与本轮新信息；过时细节可删减，多对象档案尽量保留。\n"
-        "4) 不要编造；未知写「未提供」。不要空话。全文尽量不超过 2500 字。\n"
-        "5) 直接输出记忆正文，不要前言。\n\n"
-        f"阶段：{phase}\n"
-        f"旧记忆：\n{previous_memory.strip() or '(无)'}\n\n"
-        f"本线程摘要（可空）：\n{thread_summary.strip() or '(无)'}\n\n"
-        f"最新用户：{latest_user[:1500]}\n"
-        f"最新助手：{latest_assistant[:2000]}\n"
+    """Legacy combined memory updater (kept for compatibility). Prefer split refreshers."""
+    return await refresh_user_profile_memory(
+        settings=settings,
+        previous_profile=previous_memory,
+        latest_user=latest_user,
+        latest_assistant=latest_assistant,
+        thread_summary=thread_summary,
+        phase=phase,
     )
-    out, usage = await _chat_json(
-        settings,
-        [
-            {"role": "system", "content": "你是用户长时记忆压缩助手。只输出记忆正文。"},
-            {"role": "user", "content": prompt},
-        ],
-        max_tokens=900,
-    )
-    text = (out or previous_memory).strip()
-    if len(text) > 12000:
-        text = text[:12000]
-    return text, usage
 
 
 def should_update_user_memory(*, phase: str, user_text: str, assistant_text: str) -> bool:

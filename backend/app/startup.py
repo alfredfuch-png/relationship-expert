@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
 import zipfile
 from pathlib import Path
@@ -41,6 +42,94 @@ def ensure_index_bundle(settings: Settings | None = None) -> None:
     payload = _fetch_url(url, settings)
     with zipfile.ZipFile(io.BytesIO(payload)) as zf:
         zf.extractall(data_dir)
+
+
+def _parse_index_bundle_urls(raw: str) -> dict[str, str]:
+    text = (raw or "").strip()
+    if not text:
+        return {}
+    if text.startswith("{"):
+        try:
+            obj = json.loads(text)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(obj, dict):
+            return {}
+        return {
+            str(k).strip(): str(v).strip()
+            for k, v in obj.items()
+            if str(k).strip() and str(v).strip()
+        }
+    out: dict[str, str] = {}
+    for part in text.split(","):
+        piece = part.strip()
+        if not piece or "=" not in piece:
+            continue
+        eid, url = piece.split("=", 1)
+        eid = eid.strip()
+        url = url.strip()
+        if eid and url:
+            out[eid] = url
+    return out
+
+
+def ensure_expert_index_bundles(settings: Settings | None = None) -> None:
+    """Download per-expert index zips into data/experts/{id} when missing."""
+    settings = settings or get_settings()
+    mapping = _parse_index_bundle_urls(settings.index_bundle_urls)
+    if not mapping:
+        return
+    base = settings.data_dir.resolve()
+    for eid, url in mapping.items():
+        dest = base / "experts" / eid
+        meta = read_index_meta(dest)
+        if meta.get("ready") or (dest / "chunks.jsonl").is_file():
+            continue
+        dest.mkdir(parents=True, exist_ok=True)
+        try:
+            payload = _fetch_url(url, settings)
+            with zipfile.ZipFile(io.BytesIO(payload)) as zf:
+                zf.extractall(dest)
+            logger.info("Restored expert index for %s from INDEX_BUNDLE_URLS", eid)
+        except (HTTPError, URLError, TimeoutError, RuntimeError, OSError, zipfile.BadZipFile) as exc:
+            logger.warning("Could not restore expert index for %s (%s)", eid, exc)
+
+
+def seed_expert_indexes_from_packs(settings: Settings | None = None) -> None:
+    """Copy experts/<id>/index/* into data/experts/<id> when the pack ships a local index."""
+    settings = settings or get_settings()
+    from app.experts import experts_root
+
+    root = experts_root(settings)
+    if not root.is_dir():
+        return
+    base = settings.data_dir.resolve()
+    for child in root.iterdir():
+        if not child.is_dir():
+            continue
+        pack_index = child / "index"
+        if not pack_index.is_dir():
+            continue
+        chunks_src = pack_index / "chunks.jsonl"
+        if not chunks_src.is_file():
+            continue
+        dest = base / "experts" / child.name
+        if (dest / "chunks.jsonl").is_file():
+            continue
+        dest.mkdir(parents=True, exist_ok=True)
+        for item in pack_index.iterdir():
+            if item.is_file():
+                (dest / item.name).write_bytes(item.read_bytes())
+        logger.info("Seeded expert index for %s from pack index/", child.name)
+
+
+def prepare_runtime_data(settings: Settings | None = None) -> None:
+    ensure_index_bundle(settings)
+    ensure_expert_index_bundles(settings)
+    seed_expert_indexes_from_packs(settings)
+    ensure_users_db(settings)
+    bootstrap_accounts(settings)
+    apply_admin_usernames(settings)
 
 
 def _extract_users_db_from_zip(payload: bytes, dest: Path) -> bool:
@@ -133,10 +222,3 @@ def bootstrap_accounts(settings: Settings | None = None) -> None:
     spec = (settings.users_bootstrap or "").strip()
     if spec:
         bootstrap_users(spec, settings)
-
-
-def prepare_runtime_data(settings: Settings | None = None) -> None:
-    ensure_index_bundle(settings)
-    ensure_users_db(settings)
-    bootstrap_accounts(settings)
-    apply_admin_usernames(settings)

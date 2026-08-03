@@ -42,6 +42,8 @@ def _merge_env_vars(cfg: dict) -> dict[str, str]:
         "APP_PASSWORD",
         "SESSION_SECRET",
         "INDEX_BUNDLE_URL",
+        "INDEX_BUNDLE_URLS",
+        "DEFAULT_EXPERT_ID",
         "USERS_DB_URL",
         "USERS_DB_BEARER_TOKEN",
         "R2_ACCOUNT_ID",

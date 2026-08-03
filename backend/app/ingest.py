@@ -115,22 +115,111 @@ def load_vault_chunks(settings: Settings) -> list[Chunk]:
     for md in sorted(vault.rglob("*.md")):
         if _should_skip(md, vault, settings.exclude_globs):
             continue
-        try:
-            post = frontmatter.loads(md.read_text(encoding="utf-8", errors="replace"))
-        except OSError:
-            continue
-        meta = post.metadata or {}
-        tags = meta.get("tags") or []
-        if isinstance(tags, str):
-            tags = [tags]
-        title = meta.get("title") or md.stem
-        rel = md.relative_to(vault).as_posix()
-        body = post.content or ""
-        sections = _split_by_headings(body)
-        if not sections:
-            sections = [("(whole)", body.strip() or "(empty)")]
-
-        for heading_path, section_text in sections:
-            for c in _chunk_text(rel, str(title), heading_path, section_text, [str(x) for x in tags]):
-                all_chunks.append(c)
+        all_chunks.extend(_chunks_from_markdown_file(md, vault_root=vault, settings=settings))
     return all_chunks
+
+
+def _chunks_from_markdown_file(
+    md: Path,
+    *,
+    vault_root: Path | None,
+    settings: Settings,
+    note_path_override: str | None = None,
+    title_override: str | None = None,
+) -> list[Chunk]:
+    try:
+        post = frontmatter.loads(md.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return []
+    meta = post.metadata or {}
+    tags = meta.get("tags") or []
+    if isinstance(tags, str):
+        tags = [tags]
+    title = title_override or meta.get("title") or md.stem
+    if note_path_override:
+        rel = note_path_override
+    elif vault_root is not None:
+        rel = md.relative_to(vault_root).as_posix()
+    else:
+        rel = md.name
+    body = post.content or ""
+    sections = _split_by_headings(body)
+    if not sections:
+        sections = [("(whole)", body.strip() or "(empty)")]
+
+    out: list[Chunk] = []
+    for heading_path, section_text in sections:
+        out.extend(
+            _chunk_text(rel, str(title), heading_path, section_text, [str(x) for x in tags])
+        )
+    return out
+
+
+def load_expert_knowledge_chunks(
+    pack_root: Path,
+    *,
+    settings: Settings,
+    display_title: str | None = None,
+) -> list[Chunk]:
+    """
+    Load knowledge for one expert pack.
+    Prefer experts/<id>/knowledge.md; else experts/<id>/knowledge/**/*.md.
+    """
+    knowledge_md = pack_root / "knowledge.md"
+    if knowledge_md.is_file() and knowledge_md.stat().st_size > 0:
+        return _chunks_from_markdown_file(
+            knowledge_md,
+            vault_root=None,
+            settings=settings,
+            note_path_override="knowledge.md",
+            title_override=display_title or knowledge_md.stem,
+        )
+
+    knowledge_dir = pack_root / "knowledge"
+    if not knowledge_dir.is_dir():
+        return []
+
+    all_chunks: list[Chunk] = []
+    for md in sorted(knowledge_dir.rglob("*.md")):
+        if _should_skip(md, knowledge_dir, settings.exclude_globs):
+            continue
+        all_chunks.extend(
+            _chunks_from_markdown_file(
+                md,
+                vault_root=knowledge_dir,
+                settings=settings,
+                title_override=None,
+            )
+        )
+    return all_chunks
+
+
+def load_chunks_for_expert(expert_id: str, settings: Settings) -> list[Chunk]:
+    """
+    Independent knowledge per expert:
+    - If pack has knowledge.md / knowledge/, use that.
+    - Else for afu (default), fall back to the Obsidian vault.
+    """
+    from app.experts import expert_has_pack_knowledge, load_expert_pack
+
+    pack = load_expert_pack(expert_id, settings)
+    if not pack:
+        raise FileNotFoundError(f"Expert pack not found: {expert_id}")
+
+    if expert_has_pack_knowledge(pack):
+        chunks = load_expert_knowledge_chunks(
+            pack.root,
+            settings=settings,
+            display_title=pack.display_name,
+        )
+        if chunks:
+            return chunks
+        raise FileNotFoundError(f"Expert knowledge is empty for: {pack.slug}")
+
+    if pack.slug == "afu" or pack.id == settings.default_expert_id:
+        return load_vault_chunks(settings)
+
+    raise FileNotFoundError(
+        f"No knowledge for expert «{pack.display_name}». "
+        f"Add experts/{pack.slug}/knowledge.md then rebuild index."
+    )

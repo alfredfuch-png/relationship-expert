@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal, TypeVar
+
+logger = logging.getLogger(__name__)
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,32 +41,45 @@ from app.consult import (
     decide_phase,
     load_questions_guide,
     refresh_context_summary,
-    refresh_user_memory,
+    refresh_expert_advice_memory,
+    refresh_user_profile_memory,
     should_update_user_memory,
 )
+from app.experts import expert_data_dir, experts_public_list, resolve_expert
 from app.indexing import read_index_meta, rebuild_index_async
 from app.retrieve import retrieve_context
-from app.settings import _project_root, get_settings
+from app.settings import Settings, _project_root, get_settings
 from app.startup import prepare_runtime_data
 from app.users_db_sync import r2_sync_configured, schedule_users_db_sync, sync_secret, sync_users_db_to_r2
 from app.users_store import (
     RegistrationInviteLimitError,
     TOKEN_QUOTA_EXCEEDED_MESSAGE,
+    ack_risk_alert,
+    admin_expert_detail,
+    admin_list_experts,
     admin_list_users,
     admin_overview,
     admin_user_detail,
     admin_user_usage,
+    change_user_password,
     clear_user_memory,
     consume_registration_slot,
     create_user,
     get_token_quota,
+    list_risk_alerts,
     load_chat_state,
+    load_expert_advice_memory,
     load_user_memory,
+    load_user_profile_memory,
     record_usage_event,
     registration_slots_remaining,
     release_registration_slot,
     save_chat_state,
+    save_expert_advice_memory,
     save_user_memory,
+    save_user_profile_memory,
+    try_create_risk_alert,
+    user_usage_summary,
 )
 
 
@@ -123,6 +139,8 @@ class ChatBody(BaseModel):
     history: list[HistoryMessage] = Field(default_factory=list, max_length=40)
     context_summary: str = Field(default="", max_length=8000)
     images: list[ChatImage] = Field(default_factory=list, max_length=3)
+    expert_id: str = Field(default="", max_length=64)
+    profile_synced: bool = False
 
     @model_validator(mode="after")
     def require_text_or_images(self) -> ChatBody:
@@ -144,6 +162,12 @@ class RegisterBody(BaseModel):
     username: str = Field(min_length=2, max_length=32)
     password: str = Field(min_length=4, max_length=256)
     invite_code: str = Field(min_length=1, max_length=128)
+
+
+class ChangePasswordBody(BaseModel):
+    old_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=4, max_length=256)
+    confirm_password: str = Field(min_length=4, max_length=256)
 
 
 class ChatStateBody(BaseModel):
@@ -197,6 +221,36 @@ def auth_login(body: LoginBody, response: Response) -> dict:
 def auth_logout(response: Response) -> dict:
     clear_session_cookie(response)
     return {"ok": True}
+
+
+@app.post("/api/auth/change-password")
+def auth_change_password(body: ChangePasswordBody, user_id: CurrentUserId) -> dict:
+    if user_id in ("anonymous", "shared"):
+        raise HTTPException(status_code=400, detail="需要登录账户才能重设密码。")
+    if body.new_password != body.confirm_password:
+        raise HTTPException(status_code=400, detail="两次输入的新密码不一致。")
+    try:
+        change_user_password(user_id, body.old_password, body.new_password)
+    except ValueError as exc:
+        msg = str(exc)
+        if "old password incorrect" in msg:
+            raise HTTPException(status_code=400, detail="旧密码不正确。") from exc
+        if "too short" in msg:
+            raise HTTPException(status_code=400, detail="新密码至少 4 个字符。") from exc
+        if "not found" in msg:
+            raise HTTPException(status_code=404, detail="用户不存在。") from exc
+        raise HTTPException(status_code=400, detail="无法重设密码。") from exc
+    return {"ok": True, "message": "密码已更新。"}
+
+
+@app.get("/api/user/usage")
+def api_user_usage(user_id: CurrentUserId) -> dict:
+    if user_id in ("anonymous", "shared"):
+        raise HTTPException(status_code=400, detail="需要登录账户才能查看用量。")
+    data = user_usage_summary(user_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    return data
 
 
 @app.post("/api/auth/register")
@@ -258,14 +312,26 @@ def public_config(request: Request, user_id: CurrentUserId) -> dict:  # noqa: AR
     user = resolve_user(request, s)
     return {
         "public_deploy": s.public_deploy,
-        "show_sources": not s.public_deploy,
-        "show_routing": not s.public_deploy,
-        "allow_index": not s.public_deploy,
+        # Chat UI never exposes RAG sources / routing hints / index actions.
+        "show_sources": False,
+        "show_routing": False,
+        "allow_index": False,
         "auth_required": auth_enabled(s),
         "auth_mode": auth_mode(s),
         "server_chat": server_chat_enabled(s),
         "username": user.username if user else None,
         "is_admin": bool(user.is_admin) if user else False,
+        "default_expert_id": s.default_expert_id,
+        "experts": experts_public_list(s),
+    }
+
+
+@app.get("/api/experts")
+def api_experts() -> dict:
+    s = get_settings()
+    return {
+        "default_expert_id": s.default_expert_id,
+        "experts": experts_public_list(s),
     }
 
 
@@ -316,7 +382,14 @@ def admin_sync_users_db(request: Request) -> dict:
     return {"ok": True}
 
 
-def _persist_usage(user_id: str, kind: str, usage: dict, settings) -> None:
+def _persist_usage(
+    user_id: str,
+    kind: str,
+    usage: dict,
+    settings,
+    *,
+    expert_id: str = "",
+) -> None:
     if not usage:
         return
     try:
@@ -328,6 +401,7 @@ def _persist_usage(user_id: str, kind: str, usage: dict, settings) -> None:
             completion_tokens=int(usage.get("completion_tokens") or 0),
             total_tokens=int(usage.get("total_tokens") or 0) or None,
             estimated=bool(usage.get("estimated")),
+            expert_id=expert_id,
             settings=settings,
         )
     except Exception:  # noqa: BLE001
@@ -337,6 +411,32 @@ def _persist_usage(user_id: str, kind: str, usage: dict, settings) -> None:
 @app.get("/api/admin/overview")
 def api_admin_overview(_admin: CurrentAdminUser) -> dict:  # noqa: ARG001
     return admin_overview(get_settings())
+
+
+@app.get("/api/admin/risk-alerts")
+def api_admin_risk_alerts(
+    _admin: CurrentAdminUser,  # noqa: ARG001
+    status: str = "open",
+    limit: int = 50,
+) -> dict:
+    st = (status or "open").strip().lower()
+    if st in ("", "all", "*"):
+        st_filter: str | None = None
+    elif st in ("open", "acked"):
+        st_filter = st
+    else:
+        raise HTTPException(status_code=400, detail="status 须为 open、acked 或 all")
+    return {
+        "alerts": list_risk_alerts(get_settings(), status=st_filter, limit=limit),
+    }
+
+
+@app.post("/api/admin/risk-alerts/{alert_id}/ack")
+def api_admin_risk_alert_ack(alert_id: str, _admin: CurrentAdminUser) -> dict:  # noqa: ARG001
+    alert = ack_risk_alert(alert_id, get_settings())
+    if not alert:
+        raise HTTPException(status_code=404, detail="预警不存在")
+    return {"alert": alert}
 
 
 @app.get("/api/admin/users")
@@ -359,6 +459,32 @@ def api_admin_user_usage(user_id: str, _admin: CurrentAdminUser, days: int = 30)
         raise HTTPException(status_code=404, detail="用户不存在")
     return data
 
+
+@app.get("/api/admin/experts")
+def api_admin_experts(_admin: CurrentAdminUser) -> dict:  # noqa: ARG001
+    return {"experts": admin_list_experts(get_settings())}
+
+
+@app.get("/api/admin/experts/{expert_id}")
+def api_admin_expert_detail(expert_id: str, _admin: CurrentAdminUser) -> dict:  # noqa: ARG001
+    detail = admin_expert_detail(expert_id, get_settings())
+    if not detail:
+        raise HTTPException(status_code=404, detail="智能体不存在")
+    return detail
+
+
+@app.post("/api/admin/experts/{expert_id}/index")
+async def api_admin_expert_index(expert_id: str, _admin: CurrentAdminUser) -> dict:  # noqa: ARG001
+    """Admin-only rebuild; allowed even when PUBLIC_DEPLOY disables public /api/index."""
+    from app.indexing import rebuild_expert_index_async
+
+    s = get_settings()
+    try:
+        return await rebuild_expert_index_async(expert_id, s)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 @app.get("/api/health")
 def health() -> dict:
@@ -387,20 +513,75 @@ def index_status(user_id: CurrentUserId) -> dict:  # noqa: ARG001
             "vector_enabled": bool(meta.get("vector_enabled")),
             "last_indexed_at": meta.get("last_indexed_at"),
         }
+    from app.experts import expert_data_dir, expert_has_pack_knowledge, list_expert_packs
+
+    experts_status: dict[str, Any] = {}
+    for pack in list_expert_packs(s, enabled_only=False):
+        ed = expert_data_dir(pack.slug, s)
+        em = read_index_meta(ed)
+        experts_status[pack.slug] = {
+            "id": pack.id,
+            "display_name": pack.display_name,
+            "enabled": pack.enabled,
+            "has_pack_knowledge": expert_has_pack_knowledge(pack),
+            "ready": bool(em.get("ready")),
+            "chunk_count": em.get("chunk_count", 0),
+            "data_dir": str(ed),
+        }
+    meta["experts"] = experts_status
     return meta
 
 
 @app.post("/api/index")
-async def run_index(user_id: CurrentUserId) -> dict:  # noqa: ARG001
+async def run_index(
+    user_id: CurrentUserId,
+    expert_id: str = "",
+) -> dict:  # noqa: ARG001
     s = get_settings()
     if s.public_deploy:
         raise HTTPException(status_code=403, detail="Indexing is disabled on the public deployment.")
     try:
+        eid = (expert_id or "").strip()
+        if eid:
+            from app.indexing import rebuild_expert_index_async
+
+            return await rebuild_expert_index_async(eid, s)
         return await rebuild_index_async(s)
     except FileNotFoundError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+async def _maybe_flag_risk_alert(
+    *,
+    user_id: str,
+    expert_id: str,
+    user_text: str,
+    settings: Settings,
+) -> None:
+    """Background: keyword screen + LLM confirm; never raises to caller."""
+    try:
+        from app.risk_detect import evaluate_user_message_for_risk
+
+        payload = await evaluate_user_message_for_risk(
+            user_text=user_text,
+            settings=settings,
+        )
+        if not payload:
+            return
+        try_create_risk_alert(
+            user_id=user_id,
+            expert_id=expert_id,
+            categories=list(payload.get("categories") or []),
+            snippet=str(payload.get("snippet") or ""),
+            confidence=str(payload.get("confidence") or "medium"),
+            keyword_hits=list(payload.get("keyword_hits") or []),
+            reason=str(payload.get("reason") or ""),
+            settings=settings,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("risk alert background task failed: %s", exc)
 
 
 async def _ndjson_chat_events(
@@ -409,7 +590,6 @@ async def _ndjson_chat_events(
     user_id: str,
 ) -> AsyncIterator[bytes]:
     s = get_settings()
-    yield (json.dumps({"meta": {"status": "started"}}, ensure_ascii=False) + "\n").encode()
 
     async def _cancelled() -> bool:
         return await request.is_disconnected()
@@ -418,8 +598,14 @@ async def _ndjson_chat_events(
     history = [{"role": m.role, "content": m.content} for m in body.history]
     images = [{"mime": i.mime, "data_base64": i.data_base64} for i in body.images]
     context_summary = body.context_summary.strip()
-    questions_guide = load_questions_guide()
+    expert = resolve_expert(body.expert_id, s)
+    profile_synced = bool(body.profile_synced)
+    questions_guide = expert.questions_guide or load_questions_guide(expert.id)
     account_user = user_id not in ("anonymous", "shared")
+    profile_memory = load_user_profile_memory(user_id, s) if account_user else ""
+    advice_memory = (
+        load_expert_advice_memory(user_id, expert.id, s) if account_user else ""
+    )
     user_memory = load_user_memory(user_id, s) if account_user else ""
 
     if account_user:
@@ -434,8 +620,33 @@ async def _ndjson_chat_events(
             ).encode()
             return
 
+    if account_user and user_text:
+        asyncio.create_task(
+            _maybe_flag_risk_alert(
+                user_id=user_id,
+                expert_id=expert.id,
+                user_text=user_text,
+                settings=s,
+            )
+        )
+
     if await _cancelled():
         return
+
+    yield (
+        json.dumps(
+            {
+                "meta": {
+                    "status": "started",
+                    "expert_id": expert.id,
+                    "expert_display_name": expert.display_name,
+                    "profile_synced": profile_synced,
+                }
+            },
+            ensure_ascii=False,
+        )
+        + "\n"
+    ).encode()
 
     phase_usage: dict = {}
     try:
@@ -458,20 +669,29 @@ async def _ndjson_chat_events(
         phase_usage = {}
 
     if account_user and phase_usage:
-        _persist_usage(user_id, "phase", phase_usage, s)
+        _persist_usage(user_id, "phase", phase_usage, s, expert_id=expert.id)
 
     if await _cancelled():
         return
 
     yield (
-        json.dumps({"meta": {"phase": phase, "status": "phase_decided"}}, ensure_ascii=False)
+        json.dumps(
+            {
+                "meta": {
+                    "phase": phase,
+                    "status": "phase_decided",
+                    "expert_id": expert.id,
+                }
+            },
+            ensure_ascii=False,
+        )
         + "\n"
     ).encode()
 
     chunks = []
-    routing_info: dict = {"rag_used": False, "phase": phase}
+    routing_info: dict = {"rag_used": False, "phase": phase, "expert_id": expert.id}
     if phase == "advise":
-        data_dir = s.data_dir.resolve()
+        data_dir = expert_data_dir(expert.id, s)
         meta = read_index_meta(data_dir)
         retrieve_q = user_text or context_summary or "亲密关系建议"
         try:
@@ -481,11 +701,13 @@ async def _ndjson_chat_events(
                     retrieve_q,
                     settings=s,
                     meta=meta,
+                    data_dir=data_dir,
                 ),
             )
             if retrieved is None:
                 return
             chunks, routing_info = retrieved
+            routing_info["expert_id"] = expert.id
         except RuntimeError as e:
             yield (json.dumps({"error": str(e)}, ensure_ascii=False) + "\n").encode()
             return
@@ -497,12 +719,14 @@ async def _ndjson_chat_events(
             "phase": "out_of_scope",
             "rag_used": False,
             "skipped_retrieval": True,
+            "expert_id": expert.id,
         }
     else:
         routing_info = {
             "phase": "clarify",
             "rag_used": False,
             "skipped_retrieval": True,
+            "expert_id": expert.id,
         }
 
     if await _cancelled():
@@ -518,10 +742,18 @@ async def _ndjson_chat_events(
         questions_guide=questions_guide,
         settings=s,
         user_memory=user_memory,
+        profile_memory=profile_memory,
+        advice_memory=advice_memory,
+        profile_synced=profile_synced,
+        persona_text=expert.persona,
+        expert_display_name=expert.display_name,
     )
     routing_info["rag_used"] = rag_used
     routing_info["phase"] = phase
-    routing_info["user_memory_used"] = bool(user_memory)
+    routing_info["user_memory_used"] = bool(
+        (profile_synced and (profile_memory or user_memory)) or advice_memory
+    )
+    routing_info["expert_id"] = expert.id
     relevant_chunks = filter_relevant_chunks(chunks, s) if rag_used else []
 
     if s.public_deploy:
@@ -532,7 +764,8 @@ async def _ndjson_chat_events(
                         "public_deploy": True,
                         "rag_used": rag_used,
                         "phase": phase,
-                        "user_memory_used": bool(user_memory),
+                        "expert_id": expert.id,
+                        "user_memory_used": routing_info["user_memory_used"],
                     }
                 },
                 ensure_ascii=False,
@@ -575,7 +808,7 @@ async def _ndjson_chat_events(
 
     if account_user:
         if chat_usage:
-            _persist_usage(user_id, "chat", chat_usage, s)
+            _persist_usage(user_id, "chat", chat_usage, s, expert_id=expert.id)
         elif assistant_acc:
             approx_out = max(1, len("".join(assistant_acc)) // 2)
             approx_in = max(1, (len(user_text) + len(context_summary) + len(user_memory)) // 2)
@@ -590,6 +823,7 @@ async def _ndjson_chat_events(
                     "estimated": True,
                 },
                 s,
+                expert_id=expert.id,
             )
 
     if await _cancelled():
@@ -618,7 +852,7 @@ async def _ndjson_chat_events(
                 return
             new_summary, summary_usage = summarized
             if account_user and summary_usage:
-                _persist_usage(user_id, "summary", summary_usage, s)
+                _persist_usage(user_id, "summary", summary_usage, s, expert_id=expert.id)
         except Exception:  # noqa: BLE001
             new_summary = context_summary
 
@@ -631,50 +865,87 @@ async def _ndjson_chat_events(
             + "\n"
         ).encode()
 
-    # Cross-thread long-term memory (account users only).
+    # Split long-term memory: shared profile + per-expert advice.
     if account_user and should_update_user_memory(
         phase=phase,
         user_text=user_text,
         assistant_text=assistant_text,
     ):
         try:
-            merged = await _await_unless_disconnected(
+            profile_job = await _await_unless_disconnected(
                 request,
-                refresh_user_memory(
+                refresh_user_profile_memory(
                     settings=s,
-                    previous_memory=user_memory,
+                    previous_profile=profile_memory,
                     latest_user=user_text or "（截图）",
                     latest_assistant=assistant_text,
                     thread_summary=new_summary or context_summary,
                     phase=phase,
                 ),
             )
-            if merged is None:
+            if profile_job is None:
                 return
-            memory_text, memory_usage = merged
-            if account_user and memory_usage:
-                _persist_usage(user_id, "memory", memory_usage, s)
-            if memory_text.strip() and memory_text.strip() != user_memory.strip():
-                save_user_memory(user_id, memory_text, s)
-                if r2_sync_configured(s):
-                    schedule_users_db_sync(s, True)
-                yield (
-                    json.dumps(
-                        {"meta": {"user_memory_updated": True, "phase": phase}},
-                        ensure_ascii=False,
-                    )
-                    + "\n"
-                ).encode()
+            new_profile, profile_usage = profile_job
+            if profile_usage:
+                _persist_usage(user_id, "memory", profile_usage, s, expert_id=expert.id)
+            if new_profile.strip() and new_profile.strip() != profile_memory.strip():
+                save_user_profile_memory(user_id, new_profile, s)
+
+            advice_job = await _await_unless_disconnected(
+                request,
+                refresh_expert_advice_memory(
+                    settings=s,
+                    previous_advice=advice_memory,
+                    latest_user=user_text or "（截图）",
+                    latest_assistant=assistant_text,
+                    thread_summary=new_summary or context_summary,
+                    phase=phase,
+                    expert_name=expert.display_name,
+                ),
+            )
+            if advice_job is None:
+                return
+            new_advice, advice_usage = advice_job
+            if advice_usage:
+                _persist_usage(user_id, "memory", advice_usage, s, expert_id=expert.id)
+            if new_advice.strip() and new_advice.strip() != advice_memory.strip():
+                save_expert_advice_memory(user_id, expert.id, new_advice, s)
+
+            if r2_sync_configured(s):
+                schedule_users_db_sync(s, True)
+            yield (
+                json.dumps(
+                    {
+                        "meta": {
+                            "user_memory_updated": True,
+                            "phase": phase,
+                            "expert_id": expert.id,
+                        }
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            ).encode()
         except Exception:  # noqa: BLE001
             pass
 
 
 @app.get("/api/user/memory")
-def get_user_memory(user_id: CurrentUserId) -> dict:
+def get_user_memory(
+    user_id: CurrentUserId,
+    scope: str = "profile",
+    expert_id: str = "",
+) -> dict:
     if user_id in ("anonymous", "shared"):
         raise HTTPException(status_code=400, detail="需要登录账户才能使用长时记忆。")
-    text = load_user_memory(user_id)
-    return {"memory": text, "updated": bool(text)}
+    s = get_settings()
+    sc = (scope or "profile").strip().lower()
+    if sc == "advice":
+        eid = (expert_id or s.default_expert_id).strip() or "afu"
+        text = load_expert_advice_memory(user_id, eid, s)
+        return {"scope": "advice", "expert_id": eid, "memory": text, "updated": bool(text)}
+    text = load_user_profile_memory(user_id, s)
+    return {"scope": "profile", "memory": text, "updated": bool(text)}
 
 
 @app.delete("/api/user/memory")
@@ -736,6 +1007,17 @@ def admin_spa() -> FileResponse:
 
 @app.get("/admin/{path:path}")
 def admin_spa_nested(path: str) -> FileResponse:  # noqa: ARG001
+    return _admin_index()
+
+
+@app.get("/settings")
+@app.get("/settings/")
+def settings_spa() -> FileResponse:
+    return _admin_index()
+
+
+@app.get("/settings/{path:path}")
+def settings_spa_nested(path: str) -> FileResponse:  # noqa: ARG001
     return _admin_index()
 
 

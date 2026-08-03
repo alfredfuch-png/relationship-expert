@@ -1,0 +1,8 @@
+{
+  "id": "prof_socio",
+  "display_name": "专家教授",
+  "avatar_label": "专家",
+  "short_bio": "一位研究亲密关系与家庭的社会学专家",
+  "enabled": true,
+  "scope": "intimate_relationship"
+}
